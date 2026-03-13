@@ -1,69 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Camera, Loader2, Plus, Sparkles } from 'lucide-react';
+import { Camera, ChevronLeft, ChevronRight, Loader2, Plus, Sparkles } from 'lucide-react';
 import Tesseract from 'tesseract.js';
 import { Button } from './components/ui/button';
 import { Card, CardContent } from './components/ui/card';
 import { Input } from './components/ui/input';
-
-type ReceiptItem = { id: string; name: string; price: number; quantity: number };
-type Person = { id: string; name: string };
+import { computeSplitTotals, type Person } from './lib/split';
+import { parseReceipt, type ReceiptItem, uid } from './lib/receipt';
 
 type Corner = { x: number; y: number };
-
-function uid(prefix: string) {
-  return `${prefix}_${Math.random().toString(36).slice(2, 9)}`;
-}
+type Step = 1 | 2 | 3;
 
 function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
-}
-
-function parsePrice(raw: string) {
-  const normalized = raw.replace(/\s/g, '').replace(',', '.');
-  const value = Number(normalized);
-  return Number.isFinite(value) ? value : NaN;
-}
-
-function parseReceipt(text: string): { items: ReceiptItem[]; total: number } {
-  const lines = text
-    .split('\n')
-    .map((l) => l.replace(/[|]/g, ' ').replace(/\s+/g, ' ').trim())
-    .filter(Boolean);
-
-  const items: ReceiptItem[] = [];
-  let total = 0;
-
-  for (const line of lines) {
-    const totalMatch = line.match(/(?:^|\s)(total|tot(?:al)?\.?|amount due|montante|a pagar)\s*[:€ ]*([0-9]+[.,][0-9]{2})/i);
-    if (totalMatch) {
-      const maybeTotal = parsePrice(totalMatch[2]);
-      if (!Number.isNaN(maybeTotal)) total = Math.max(total, maybeTotal);
-    }
-
-    const qtyLine = line.match(/^([0-9]+(?:[.,][0-9]+)?)\s*[x×]\s+(.+?)\s+([0-9]+[.,][0-9]{2})$/i);
-    if (qtyLine) {
-      const quantity = parsePrice(qtyLine[1]);
-      const name = qtyLine[2].trim();
-      const price = parsePrice(qtyLine[3]);
-      if (name && !Number.isNaN(quantity) && !Number.isNaN(price)) {
-        items.push({ id: uid('item'), name, price, quantity });
-      }
-      continue;
-    }
-
-    const itemMatch = line.match(/^(.+?)\s+([0-9]+[.,][0-9]{2})$/);
-    if (!itemMatch) continue;
-
-    const name = itemMatch[1].replace(/\s{2,}/g, ' ').trim();
-    const price = parsePrice(itemMatch[2]);
-    if (!name || Number.isNaN(price)) continue;
-    if (/(total|subtotal|troco|change|iva|vat)/i.test(name)) continue;
-
-    items.push({ id: uid('item'), name, price, quantity: 1 });
-  }
-
-  if (!total) total = items.reduce((s, i) => s + i.price * i.quantity, 0);
-  return { items: items.slice(0, 60), total };
 }
 
 function solveLinear(A: number[][], b: number[]) {
@@ -146,24 +94,20 @@ function bilinearSample(data: Uint8ClampedArray, w: number, h: number, x: number
 
   const out = [0, 0, 0, 0];
   for (let c = 0; c < 4; c++) {
-    const v00 = data[i00 + c];
-    const v10 = data[i10 + c];
-    const v01 = data[i01 + c];
-    const v11 = data[i11 + c];
     out[c] =
-      v00 * (1 - dx) * (1 - dy) +
-      v10 * dx * (1 - dy) +
-      v01 * (1 - dx) * dy +
-      v11 * dx * dy;
+      data[i00 + c] * (1 - dx) * (1 - dy) +
+      data[i10 + c] * dx * (1 - dy) +
+      data[i01 + c] * (1 - dx) * dy +
+      data[i11 + c] * dx * dy;
   }
   return out;
 }
 
-function preprocessForOcr(inputDataUrl: string) {
+async function preprocessForOcr(inputDataUrl: string) {
   return new Promise<string>((resolve, reject) => {
     const img = new Image();
     img.onload = () => {
-      const scale = Math.max(1.5, 1600 / Math.max(img.width, 1));
+      const scale = Math.max(1.7, 1900 / Math.max(img.width, 1));
       const w = Math.round(img.width * scale);
       const h = Math.round(img.height * scale);
 
@@ -182,8 +126,7 @@ function preprocessForOcr(inputDataUrl: string) {
         const gray = 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
         sum += gray;
       }
-      const mean = sum / (d.length / 4);
-      const threshold = mean * 0.93;
+      const threshold = (sum / (d.length / 4)) * 0.9;
 
       for (let i = 0; i < d.length; i += 4) {
         const gray = 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
@@ -202,15 +145,17 @@ function preprocessForOcr(inputDataUrl: string) {
 }
 
 function App() {
-  const [imageUrl, setImageUrl] = useState<string | null>(null);
+  const [step, setStep] = useState<Step>(1);
   const [imageEl, setImageEl] = useState<HTMLImageElement | null>(null);
-  const [corners, setCorners] = useState<Corner[]>([]);
-  const [activeCorner, setActiveCorner] = useState<number | null>(null);
   const [processedDataUrl, setProcessedDataUrl] = useState<string | null>(null);
-  const [brightness, setBrightness] = useState(100);
-  const [contrast, setContrast] = useState(100);
+  const [corners, setCorners] = useState<Corner[]>([]);
+  const [dragCorner, setDragCorner] = useState<number | null>(null);
+  const [brightness, setBrightness] = useState(110);
+  const [contrast, setContrast] = useState(120);
   const [saturation, setSaturation] = useState(100);
   const [ocrLoading, setOcrLoading] = useState(false);
+  const [ocrError, setOcrError] = useState<string | null>(null);
+
   const [items, setItems] = useState<ReceiptItem[]>([]);
   const [people, setPeople] = useState<Person[]>([
     { id: uid('p'), name: 'Person 1' },
@@ -220,52 +165,34 @@ function App() {
   const [tipValue, setTipValue] = useState(10);
   const [alloc, setAlloc] = useState<Record<string, Record<string, number>>>({});
 
-  const previewRef = useRef<HTMLCanvasElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const overlayRef = useRef<HTMLDivElement>(null);
 
   const subtotal = useMemo(() => items.reduce((s, i) => s + i.price * i.quantity, 0), [items]);
   const tipAmount = tipMode === 'percent' ? subtotal * (tipValue / 100) : tipValue;
-
-  const personTotals = useMemo(() => {
-    const result: Record<string, number> = {};
-    people.forEach((p) => (result[p.id] = 0));
-
-    for (const item of items) {
-      const totalAssigned = people.reduce((s, p) => s + (alloc[item.id]?.[p.id] || 0), 0);
-      if (!totalAssigned) continue;
-      for (const p of people) {
-        const q = alloc[item.id]?.[p.id] || 0;
-        result[p.id] += (q / totalAssigned) * item.price * item.quantity;
-      }
-    }
-
-    const totalWithoutTip = Object.values(result).reduce((a, b) => a + b, 0) || 1;
-    for (const p of people) {
-      const share = result[p.id] / totalWithoutTip;
-      result[p.id] += tipAmount * share;
-    }
-    return result;
-  }, [people, alloc, items, tipAmount]);
+  const personTotals = useMemo(() => computeSplitTotals(people, items, alloc, tipAmount), [people, items, alloc, tipAmount]);
 
   const onFile = (file?: File) => {
     if (!file) return;
+    setOcrError(null);
     const url = URL.createObjectURL(file);
-    setImageUrl(url);
+    setProcessedDataUrl(null);
     const img = new Image();
     img.onload = () => {
       setImageEl(img);
       setCorners([
-        { x: img.width * 0.1, y: img.height * 0.1 },
-        { x: img.width * 0.9, y: img.height * 0.1 },
-        { x: img.width * 0.9, y: img.height * 0.9 },
-        { x: img.width * 0.1, y: img.height * 0.9 },
+        { x: img.width * 0.08, y: img.height * 0.08 },
+        { x: img.width * 0.92, y: img.height * 0.08 },
+        { x: img.width * 0.92, y: img.height * 0.92 },
+        { x: img.width * 0.08, y: img.height * 0.92 },
       ]);
     };
     img.src = url;
   };
 
   useEffect(() => {
-    if (!imageEl || !previewRef.current) return;
-    const canvas = previewRef.current;
+    if (!imageEl || !canvasRef.current) return;
+    const canvas = canvasRef.current;
     const maxW = 900;
     const scale = Math.min(1, maxW / imageEl.width);
     canvas.width = imageEl.width * scale;
@@ -278,42 +205,33 @@ function App() {
     ctx.drawImage(imageEl, 0, 0, canvas.width, canvas.height);
     ctx.filter = 'none';
 
-    const scaled = corners.map((c) => ({ x: c.x * scale, y: c.y * scale }));
-    ctx.strokeStyle = '#0f172a';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    scaled.forEach((c, i) => (i ? ctx.lineTo(c.x, c.y) : ctx.moveTo(c.x, c.y)));
-    ctx.closePath();
-    ctx.stroke();
-
-    ctx.fillStyle = '#f8fafc';
-    scaled.forEach((c) => {
+    if (corners.length === 4) {
+      const scaled = corners.map((c) => ({ x: c.x * scale, y: c.y * scale }));
+      ctx.strokeStyle = '#06b6d4';
+      ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.arc(c.x, c.y, 7, 0, Math.PI * 2);
-      ctx.fill();
+      scaled.forEach((c, i) => (i ? ctx.lineTo(c.x, c.y) : ctx.moveTo(c.x, c.y)));
+      ctx.closePath();
       ctx.stroke();
-    });
+    }
   }, [imageEl, corners, brightness, contrast, saturation]);
+
+  const moveCornerFromPointer = (cornerIndex: number, clientX: number, clientY: number) => {
+    if (!imageEl || !overlayRef.current || !canvasRef.current) return;
+    const rect = overlayRef.current.getBoundingClientRect();
+    const xOnCanvas = clamp(clientX - rect.left, 0, rect.width);
+    const yOnCanvas = clamp(clientY - rect.top, 0, rect.height);
+    const scale = imageEl.width / canvasRef.current.width;
+    const x = xOnCanvas * scale;
+    const y = yOnCanvas * scale;
+    setCorners((prev) => prev.map((c, i) => (i === cornerIndex ? { x, y } : c)));
+  };
 
   const flattenAndEnhance = () => {
     if (!imageEl || corners.length !== 4) return;
 
-    const width = Math.max(
-      400,
-      Math.round(
-        (Math.hypot(corners[1].x - corners[0].x, corners[1].y - corners[0].y) +
-          Math.hypot(corners[2].x - corners[3].x, corners[2].y - corners[3].y)) /
-          2,
-      ),
-    );
-    const height = Math.max(
-      600,
-      Math.round(
-        (Math.hypot(corners[3].x - corners[0].x, corners[3].y - corners[0].y) +
-          Math.hypot(corners[2].x - corners[1].x, corners[2].y - corners[1].y)) /
-          2,
-      ),
-    );
+    const width = Math.max(500, Math.round((Math.hypot(corners[1].x - corners[0].x, corners[1].y - corners[0].y) + Math.hypot(corners[2].x - corners[3].x, corners[2].y - corners[3].y)) / 2));
+    const height = Math.max(700, Math.round((Math.hypot(corners[3].x - corners[0].x, corners[3].y - corners[0].y) + Math.hypot(corners[2].x - corners[1].x, corners[2].y - corners[1].y)) / 2));
 
     const srcCanvas = document.createElement('canvas');
     srcCanvas.width = imageEl.width;
@@ -351,162 +269,161 @@ function App() {
     dstCtx.putImageData(out, 0, 0);
     dstCtx.filter = `brightness(${brightness}%) contrast(${contrast}%) saturate(${saturation}%)`;
     dstCtx.drawImage(dstCanvas, 0, 0);
-
-    const url = dstCanvas.toDataURL('image/png');
-    setProcessedDataUrl(url);
+    setProcessedDataUrl(dstCanvas.toDataURL('image/png'));
   };
 
   const runOcr = async () => {
     if (!processedDataUrl) return;
     setOcrLoading(true);
+    setOcrError(null);
     try {
       const prepared = await preprocessForOcr(processedDataUrl);
-      const result = await Tesseract.recognize(prepared, 'eng');
+      const result = await Tesseract.recognize(prepared, 'eng+por');
       const parsed = parseReceipt(result.data.text);
-      setItems(
-        parsed.items.length
-          ? parsed.items
-          : [{ id: uid('item'), name: 'Manual item', price: parsed.total || 0, quantity: 1 }],
-      );
+      if (!parsed.items.length) {
+        setOcrError('Could not extract line items from this photo. You can still add items manually.');
+      }
+      setItems(parsed.items.length ? parsed.items : [{ id: uid('item'), name: 'Manual item', quantity: 1, price: 0 }]);
+      setStep(2);
+    } catch {
+      setOcrError('OCR failed on this image. Try increasing contrast, recropping, and run extract again.');
     } finally {
       setOcrLoading(false);
     }
   };
 
-  const total = Object.values(personTotals).reduce((a, b) => a + b, 0);
-
   return (
-    <div className="mx-auto max-w-6xl p-4 md:p-8 space-y-4">
-      <h1 className="text-2xl font-bold">Split 🍕</h1>
-      <p className="text-sm text-slate-600">Receipt scanner + smart split MVP (mobile-first)</p>
+    <div className="mx-auto max-w-3xl p-4 space-y-4 pb-16">
+      <h1 className="text-2xl font-bold">Split</h1>
+      <p className="text-sm text-slate-600">Step {step} of 3</p>
 
-      <Card><CardContent className="space-y-3">
-        <div className="flex items-center gap-3">
+      {step === 1 && (
+        <Card><CardContent className="space-y-4">
+          <h2 className="font-semibold">1) Receipt photo + crop</h2>
           <label className="inline-flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 text-sm">
             <Camera className="size-4" /> Upload receipt photo
             <input type="file" accept="image/*" capture="environment" className="hidden" onChange={(e) => onFile(e.target.files?.[0])} />
           </label>
-          <Button onClick={flattenAndEnhance} disabled={!imageEl}>Flatten image</Button>
-          <Button onClick={runOcr} disabled={!processedDataUrl || ocrLoading}>{ocrLoading ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />} Extract text</Button>
-        </div>
 
-        {imageUrl && <canvas
-          ref={previewRef}
-          className="w-full rounded border bg-white touch-none"
-          onPointerDown={(e) => {
-            if (!imageEl || !previewRef.current) return;
-            const rect = previewRef.current.getBoundingClientRect();
-            const scale = imageEl.width / previewRef.current.width;
-            const x = (e.clientX - rect.left) * scale;
-            const y = (e.clientY - rect.top) * scale;
-            const nearest = corners.findIndex((c) => Math.hypot(c.x - x, c.y - y) < 45 * scale);
-            if (nearest >= 0) {
-              setActiveCorner(nearest);
-              previewRef.current.setPointerCapture(e.pointerId);
-            }
-          }}
-          onPointerMove={(e) => {
-            if (activeCorner === null || !imageEl || !previewRef.current) return;
-            const rect = previewRef.current.getBoundingClientRect();
-            const scale = imageEl.width / previewRef.current.width;
-            const x = clamp((e.clientX - rect.left) * scale, 0, imageEl.width);
-            const y = clamp((e.clientY - rect.top) * scale, 0, imageEl.height);
-            setCorners((prev) => prev.map((c, i) => (i === activeCorner ? { x, y } : c)));
-          }}
-          onPointerUp={() => setActiveCorner(null)}
-          onPointerCancel={() => setActiveCorner(null)}
-          onPointerLeave={() => setActiveCorner(null)}
-        />}
-
-        <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
-          {[
-            { label: 'Brightness', value: brightness, setValue: setBrightness },
-            { label: 'Contrast', value: contrast, setValue: setContrast },
-            { label: 'Saturation', value: saturation, setValue: setSaturation },
-          ].map(({ label, value, setValue }) => (
-            <label key={label} className="text-sm">
-              {label}: {value}%
-              <input className="w-full" type="range" min={50} max={200} value={value} onChange={(e) => setValue(Number(e.target.value))} />
-            </label>
-          ))}
-        </div>
-
-        {processedDataUrl && <img src={processedDataUrl} alt="Processed receipt" className="max-h-96 rounded border" />}
-      </CardContent></Card>
-
-      <Card><CardContent className="space-y-2">
-        <div className="flex items-center justify-between"><h2 className="font-semibold">Receipt Items</h2></div>
-        {items.map((it) => (
-          <div key={it.id} className="grid grid-cols-12 gap-2">
-            <Input className="col-span-7" value={it.name} onChange={(e) => setItems((p) => p.map((x) => x.id === it.id ? { ...x, name: e.target.value } : x))} />
-            <Input className="col-span-2" type="number" step="0.01" value={it.quantity} onChange={(e) => setItems((p) => p.map((x) => x.id === it.id ? { ...x, quantity: Number(e.target.value || 1) } : x))} />
-            <Input className="col-span-3" type="number" step="0.01" value={it.price} onChange={(e) => setItems((p) => p.map((x) => x.id === it.id ? { ...x, price: Number(e.target.value || 0) } : x))} />
-          </div>
-        ))}
-        <Button variant="outline" onClick={() => setItems((p) => [...p, { id: uid('item'), name: 'New item', quantity: 1, price: 0 }])}>Add item</Button>
-      </CardContent></Card>
-
-      <Card><CardContent className="space-y-2">
-        <div className="flex items-center justify-between">
-          <h2 className="font-semibold">People</h2>
-          <Button variant="outline" onClick={() => setPeople((p) => [...p, { id: uid('p'), name: `Person ${p.length + 1}` }])}><Plus className="size-4" /> Add person</Button>
-        </div>
-        <div className="grid gap-2 md:grid-cols-3">
-          {people.map((p) => <Input key={p.id} value={p.name} onChange={(e) => setPeople((prev) => prev.map((x) => x.id === p.id ? { ...x, name: e.target.value } : x))} />)}
-        </div>
-      </CardContent></Card>
-
-      <Card><CardContent className="space-y-3 overflow-x-auto">
-        <h2 className="font-semibold">Allocation table (float quantities allowed)</h2>
-        <table className="min-w-full text-sm">
-          <thead>
-            <tr className="border-b"><th className="py-2 text-left">Item</th>{people.map((p) => <th key={p.id} className="px-2">{p.name}</th>)}</tr>
-          </thead>
-          <tbody>
-            {items.map((item) => (
-              <tr key={item.id} className="border-b align-top">
-                <td className="py-2 pr-3">{item.name} ({item.quantity} × €{item.price.toFixed(2)})</td>
-                {people.map((p) => (
-                  <td key={p.id} className="p-1">
-                    <Input
-                      type="number"
-                      step="0.1"
-                      value={alloc[item.id]?.[p.id] ?? 0}
-                      onChange={(e) => setAlloc((prev) => ({
-                        ...prev,
-                        [item.id]: { ...(prev[item.id] || {}), [p.id]: Number(e.target.value || 0) },
-                      }))}
+          {imageEl && (
+            <div className="space-y-2">
+              <div ref={overlayRef} className="relative w-full touch-none" style={{ maxWidth: 900 }}>
+                <canvas ref={canvasRef} className="w-full rounded border bg-white block" />
+                {corners.map((corner, i) => {
+                  const scale = imageEl.width / (canvasRef.current?.width || imageEl.width);
+                  const left = corner.x / scale;
+                  const top = corner.y / scale;
+                  return (
+                    <button
+                      key={i}
+                      aria-label={`corner-${i + 1}`}
+                      className="absolute h-8 w-8 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-cyan-500 bg-white shadow"
+                      style={{ left, top }}
+                      onPointerDown={(e) => {
+                        e.preventDefault();
+                        setDragCorner(i);
+                        (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+                      }}
+                      onPointerMove={(e) => {
+                        if (dragCorner !== i) return;
+                        moveCornerFromPointer(i, e.clientX, e.clientY);
+                      }}
+                      onPointerUp={() => setDragCorner(null)}
+                      onPointerCancel={() => setDragCorner(null)}
                     />
-                  </td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </CardContent></Card>
+                  );
+                })}
+              </div>
 
-      <Card><CardContent className="space-y-3">
-        <h2 className="font-semibold">Tip + Summary</h2>
-        <div className="flex items-center gap-2">
-          <Button variant={tipMode === 'percent' ? 'default' : 'outline'} onClick={() => setTipMode('percent')}>%</Button>
-          <Button variant={tipMode === 'fixed' ? 'default' : 'outline'} onClick={() => setTipMode('fixed')}>€</Button>
-          <Input className="max-w-40" type="number" step="0.5" value={tipValue} onChange={(e) => setTipValue(Number(e.target.value || 0))} />
-        </div>
-        <div className="space-y-1 text-sm">
-          <div>Subtotal: €{subtotal.toFixed(2)}</div>
-          <div>Tip: €{tipAmount.toFixed(2)}</div>
-          <div className="font-semibold">Total: €{(subtotal + tipAmount).toFixed(2)}</div>
-        </div>
-        <div className="grid gap-2 md:grid-cols-3">
-          {people.map((p) => (
-            <div key={p.id} className="rounded border p-3 text-sm">
-              <div className="font-medium">{p.name}</div>
-              <div>€{(personTotals[p.id] || 0).toFixed(2)}</div>
+              <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
+                {[
+                  { label: 'Brightness', value: brightness, setValue: setBrightness },
+                  { label: 'Contrast', value: contrast, setValue: setContrast },
+                  { label: 'Saturation', value: saturation, setValue: setSaturation },
+                ].map(({ label, value, setValue }) => (
+                  <label key={label} className="text-sm">
+                    {label}: {value}%
+                    <input className="w-full" type="range" min={50} max={200} value={value} onChange={(e) => setValue(Number(e.target.value))} />
+                  </label>
+                ))}
+              </div>
+
+              <div className="flex gap-2">
+                <Button onClick={flattenAndEnhance}>Flatten image</Button>
+                <Button onClick={runOcr} disabled={!processedDataUrl || ocrLoading}>
+                  {ocrLoading ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />} Extract text
+                </Button>
+              </div>
+              {ocrError && <p className="text-sm text-red-600">{ocrError}</p>}
+              {processedDataUrl && <img src={processedDataUrl} className="max-h-80 rounded border" alt="processed" />}
+            </div>
+          )}
+        </CardContent></Card>
+      )}
+
+      {step === 2 && (
+        <Card><CardContent className="space-y-3">
+          <h2 className="font-semibold">2) Review extracted items</h2>
+          {items.map((it) => (
+            <div key={it.id} className="grid grid-cols-12 gap-2">
+              <Input className="col-span-6" value={it.name} onChange={(e) => setItems((p) => p.map((x) => x.id === it.id ? { ...x, name: e.target.value } : x))} />
+              <Input className="col-span-2" type="number" step="0.1" value={it.quantity} onChange={(e) => setItems((p) => p.map((x) => x.id === it.id ? { ...x, quantity: Number(e.target.value || 1) } : x))} />
+              <Input className="col-span-3" type="number" step="0.01" value={it.price} onChange={(e) => setItems((p) => p.map((x) => x.id === it.id ? { ...x, price: Number(e.target.value || 0) } : x))} />
+              <Button className="col-span-1" variant="ghost" onClick={() => setItems((p) => p.filter((x) => x.id !== it.id))}>✕</Button>
             </div>
           ))}
+          <Button variant="outline" onClick={() => setItems((p) => [...p, { id: uid('item'), name: 'New item', quantity: 1, price: 0 }])}>Add item</Button>
+        </CardContent></Card>
+      )}
+
+      {step === 3 && (
+        <>
+          <Card><CardContent className="space-y-2">
+            <h2 className="font-semibold">3) People + allocation</h2>
+            <div className="grid gap-2 md:grid-cols-3">
+              {people.map((p) => <Input key={p.id} value={p.name} onChange={(e) => setPeople((prev) => prev.map((x) => x.id === p.id ? { ...x, name: e.target.value } : x))} />)}
+            </div>
+            <Button variant="outline" onClick={() => setPeople((p) => [...p, { id: uid('p'), name: `Person ${p.length + 1}` }])}><Plus className="size-4" /> Add person</Button>
+          </CardContent></Card>
+
+          <Card><CardContent className="space-y-3 overflow-x-auto">
+            <table className="min-w-full text-sm">
+              <thead><tr className="border-b"><th className="py-2 text-left">Item</th>{people.map((p) => <th key={p.id}>{p.name}</th>)}</tr></thead>
+              <tbody>
+                {items.map((item) => (
+                  <tr key={item.id} className="border-b">
+                    <td className="py-2">{item.name} ({item.quantity} × €{item.price.toFixed(2)})</td>
+                    {people.map((p) => (
+                      <td key={p.id} className="p-1">
+                        <Input type="number" step="0.1" value={alloc[item.id]?.[p.id] ?? 0} onChange={(e) => setAlloc((prev) => ({ ...prev, [item.id]: { ...(prev[item.id] || {}), [p.id]: Number(e.target.value || 0) } }))} />
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </CardContent></Card>
+
+          <Card><CardContent className="space-y-2">
+            <div className="flex items-center gap-2">
+              <Button variant={tipMode === 'percent' ? 'default' : 'outline'} onClick={() => setTipMode('percent')}>%</Button>
+              <Button variant={tipMode === 'fixed' ? 'default' : 'outline'} onClick={() => setTipMode('fixed')}>€</Button>
+              <Input className="max-w-32" type="number" step="0.5" value={tipValue} onChange={(e) => setTipValue(Number(e.target.value || 0))} />
+            </div>
+            <p className="text-sm">Subtotal: €{subtotal.toFixed(2)} · Tip: €{tipAmount.toFixed(2)}</p>
+            <div className="grid gap-2 md:grid-cols-2">
+              {people.map((p) => <div key={p.id} className="rounded border p-2 text-sm"><b>{p.name}</b>: €{(personTotals[p.id] || 0).toFixed(2)}</div>)}
+            </div>
+          </CardContent></Card>
+        </>
+      )}
+
+      <div className="fixed bottom-0 left-0 right-0 border-t bg-white p-3">
+        <div className="mx-auto flex max-w-3xl justify-between">
+          <Button variant="outline" disabled={step === 1} onClick={() => setStep((s) => Math.max(1, s - 1) as Step)}><ChevronLeft className="size-4" /> Back</Button>
+          <Button disabled={(step === 1 && !processedDataUrl) || (step === 2 && items.length === 0) || step === 3} onClick={() => setStep((s) => Math.min(3, s + 1) as Step)}>Next <ChevronRight className="size-4" /></Button>
         </div>
-        <p className="text-xs text-slate-500">Distributed total: €{total.toFixed(2)}</p>
-      </CardContent></Card>
+      </div>
     </div>
   );
 }
