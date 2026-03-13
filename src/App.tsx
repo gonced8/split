@@ -428,7 +428,7 @@ function App() {
                     key={key}
                     type="button"
                     onClick={() => setStep(numericStep)}
-                    className={`rounded-2xl border p-3 text-left transition sm:p-4 ${
+                    className={`flex flex-col items-center gap-2 rounded-2xl border p-3 text-center transition sm:gap-2.5 sm:p-4 ${
                       active
                         ? 'border-teal-400 bg-teal-50 shadow-[0_8px_24px_rgba(20,184,166,0.14)]'
                         : complete
@@ -436,18 +436,16 @@ function App() {
                           : 'border-slate-200 bg-white'
                     }`}
                   >
-                    <div className="flex items-center gap-2 sm:gap-3">
-                      <div
-                        className={`flex size-9 items-center justify-center rounded-xl sm:size-11 sm:rounded-2xl ${
-                          active ? 'bg-teal-600 text-white' : complete ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-400'
-                        }`}
-                      >
-                        {complete ? <Check className="size-4 sm:size-5" /> : <Icon className="size-4 sm:size-5" />}
-                      </div>
-                      <div className="min-w-0">
-                        <p className="truncate text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">{meta.label}</p>
-                        <p className="hidden truncate text-sm font-semibold text-slate-900 sm:block">{meta.title}</p>
-                      </div>
+                    <div
+                      className={`flex size-10 shrink-0 items-center justify-center rounded-xl sm:size-11 sm:rounded-2xl ${
+                        active ? 'bg-teal-600 text-white' : complete ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-400'
+                      }`}
+                    >
+                      {complete ? <Check className="size-5 sm:size-5" /> : <Icon className="size-5 sm:size-5" />}
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">{meta.label}</p>
+                      <p className="mt-0.5 hidden text-sm font-semibold text-slate-900 sm:block">{meta.title}</p>
                     </div>
                   </button>
                 );
