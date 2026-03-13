@@ -23,4 +23,23 @@ describe('parseReceipt', () => {
     const out = parseReceipt(input);
     expect(out.items.map((i) => i.name)).toEqual(['Steak']);
   });
+
+  it('parses dollar receipt sample with subtotal tax total', () => {
+    const input = `
+      1 Tacos Del Mal Shrimp $14.98
+      1 Especial Salad Chicken $12.50
+      1 Fountain Beverage $1.99
+      SUBTOTAL: $29.47
+      TAX: $1.92
+      TOTAL: $31.39
+    `;
+    const out = parseReceipt(input);
+    expect(out.items.map((i) => i.name)).toEqual([
+      'Tacos Del Mal Shrimp',
+      'Especial Salad Chicken',
+      'Fountain Beverage',
+    ]);
+    expect(out.items.map((i) => i.price)).toEqual([14.98, 12.5, 1.99]);
+    expect(out.total).toBeCloseTo(31.39, 2);
+  });
 });

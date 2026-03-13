@@ -181,10 +181,10 @@ function App() {
     img.onload = () => {
       setImageEl(img);
       setCorners([
-        { x: img.width * 0.08, y: img.height * 0.08 },
-        { x: img.width * 0.92, y: img.height * 0.08 },
-        { x: img.width * 0.92, y: img.height * 0.92 },
-        { x: img.width * 0.08, y: img.height * 0.92 },
+        { x: 0, y: 0 },
+        { x: img.width, y: 0 },
+        { x: img.width, y: img.height },
+        { x: 0, y: img.height },
       ]);
     };
     img.src = url;
@@ -278,11 +278,19 @@ function App() {
     setOcrError(null);
     try {
       const prepared = await preprocessForOcr(processedDataUrl);
-      const result = await Tesseract.recognize(prepared, 'eng+por');
-      const parsed = parseReceipt(result.data.text);
+      const firstPass = await Tesseract.recognize(prepared, 'eng+por');
+      let parsed = parseReceipt(firstPass.data.text);
+
+      if (!parsed.items.length) {
+        const fallbackPass = await Tesseract.recognize(processedDataUrl, 'eng+por');
+        const fallbackParsed = parseReceipt(fallbackPass.data.text);
+        if (fallbackParsed.items.length) parsed = fallbackParsed;
+      }
+
       if (!parsed.items.length) {
         setOcrError('Could not extract line items from this photo. You can still add items manually.');
       }
+
       setItems(parsed.items.length ? parsed.items : [{ id: uid('item'), name: 'Manual item', quantity: 1, price: 0 }]);
       setStep(2);
     } catch {
@@ -310,15 +318,14 @@ function App() {
               <div ref={overlayRef} className="relative w-full touch-none" style={{ maxWidth: 900 }}>
                 <canvas ref={canvasRef} className="w-full rounded border bg-white block" />
                 {corners.map((corner, i) => {
-                  const scale = imageEl.width / (canvasRef.current?.width || imageEl.width);
-                  const left = corner.x / scale;
-                  const top = corner.y / scale;
+                  const leftPct = (corner.x / imageEl.width) * 100;
+                  const topPct = (corner.y / imageEl.height) * 100;
                   return (
                     <button
                       key={i}
                       aria-label={`corner-${i + 1}`}
                       className="absolute h-8 w-8 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-cyan-500 bg-white shadow"
-                      style={{ left, top }}
+                      style={{ left: `${leftPct}%`, top: `${topPct}%` }}
                       onPointerDown={(e) => {
                         e.preventDefault();
                         setDragCorner(i);

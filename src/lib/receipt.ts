@@ -20,13 +20,13 @@ export function parseReceipt(text: string): { items: ReceiptItem[]; total: numbe
   let total = 0;
 
   for (const line of lines) {
-    const totalMatch = line.match(/(?:^|\s)(total|tot(?:al)?\.?|amount due|montante|a pagar)\s*[:€ ]*([0-9]+[.,][0-9]{2})/i);
+    const totalMatch = line.match(/(?:^|\s)(total|tot(?:al)?\.?|amount due|montante|a pagar)\s*[:€$ ]*([0-9]+[.,][0-9]{2})/i);
     if (totalMatch) {
       const maybeTotal = parsePrice(totalMatch[2]);
       if (!Number.isNaN(maybeTotal)) total = Math.max(total, maybeTotal);
     }
 
-    const qtyLine = line.match(/^([0-9]+(?:[.,][0-9]+)?)\s*[x×]\s+(.+?)\s+([0-9]+[.,][0-9]{2})$/i);
+    const qtyLine = line.match(/^([0-9]+(?:[.,][0-9]+)?)\s*[x×]\s+(.+?)\s+[$€]?\s*([0-9]+[.,][0-9]{2})$/i);
     if (qtyLine) {
       const quantity = parsePrice(qtyLine[1]);
       const name = qtyLine[2].trim();
@@ -37,13 +37,13 @@ export function parseReceipt(text: string): { items: ReceiptItem[]; total: numbe
       continue;
     }
 
-    const itemMatch = line.match(/^(.+?)\s+([0-9]+[.,][0-9]{2})$/);
+    const itemMatch = line.match(/^(.+?)\s+[$€]?\s*([0-9]+[.,][0-9]{2})$/);
     if (!itemMatch) continue;
 
-    const name = itemMatch[1].replace(/\s{2,}/g, ' ').trim();
+    const name = itemMatch[1].replace(/^\d+\s+/, '').replace(/\s{2,}/g, ' ').trim();
     const price = parsePrice(itemMatch[2]);
     if (!name || Number.isNaN(price)) continue;
-    if (/(total|subtotal|troco|change|iva|vat|mbway|visa|mastercard)/i.test(name)) continue;
+    if (/(total|subtotal|tax|troco|change|iva|vat|mbway|visa|mastercard)/i.test(name)) continue;
 
     items.push({ id: uid('item'), name, price, quantity: 1 });
   }
