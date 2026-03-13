@@ -150,6 +150,7 @@ function App() {
   const [processedDataUrl, setProcessedDataUrl] = useState<string | null>(null);
   const [corners, setCorners] = useState<Corner[]>([]);
   const [dragCorner, setDragCorner] = useState<number | null>(null);
+  const [dragOffset, setDragOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [brightness, setBrightness] = useState(110);
   const [contrast, setContrast] = useState(120);
   const [saturation, setSaturation] = useState(100);
@@ -216,14 +217,16 @@ function App() {
     }
   }, [imageEl, corners, brightness, contrast, saturation]);
 
-  const moveCornerFromPointer = (cornerIndex: number, clientX: number, clientY: number) => {
+  const moveCornerFromPointer = (cornerIndex: number, clientX: number, clientY: number, offset = { x: 0, y: 0 }) => {
     if (!imageEl || !overlayRef.current || !canvasRef.current) return;
     const rect = overlayRef.current.getBoundingClientRect();
-    const xOnCanvas = clamp(clientX - rect.left, 0, rect.width);
-    const yOnCanvas = clamp(clientY - rect.top, 0, rect.height);
-    const scale = imageEl.width / canvasRef.current.width;
-    const x = xOnCanvas * scale;
-    const y = yOnCanvas * scale;
+    const xOnCanvas = clamp(clientX - rect.left - offset.x, 0, rect.width);
+    const yOnCanvas = clamp(clientY - rect.top - offset.y, 0, rect.height);
+
+    const xScale = imageEl.width / canvasRef.current.width;
+    const yScale = imageEl.height / canvasRef.current.height;
+    const x = xOnCanvas * xScale;
+    const y = yOnCanvas * yScale;
     setCorners((prev) => prev.map((c, i) => (i === cornerIndex ? { x, y } : c)));
   };
 
@@ -328,15 +331,24 @@ function App() {
                       style={{ left: `${leftPct}%`, top: `${topPct}%` }}
                       onPointerDown={(e) => {
                         e.preventDefault();
+                        if (!overlayRef.current) return;
+                        const rect = overlayRef.current.getBoundingClientRect();
+                        const cornerX = (corner.x / imageEl.width) * rect.width;
+                        const cornerY = (corner.y / imageEl.height) * rect.height;
+                        setDragOffset({
+                          x: (e.clientX - rect.left) - cornerX,
+                          y: (e.clientY - rect.top) - cornerY,
+                        });
                         setDragCorner(i);
                         (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
                       }}
                       onPointerMove={(e) => {
                         if (dragCorner !== i) return;
-                        moveCornerFromPointer(i, e.clientX, e.clientY);
+                        moveCornerFromPointer(i, e.clientX, e.clientY, dragOffset);
                       }}
                       onPointerUp={() => setDragCorner(null)}
                       onPointerCancel={() => setDragCorner(null)}
+                      onPointerLeave={() => setDragCorner(null)}
                     />
                   );
                 })}
