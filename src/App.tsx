@@ -149,8 +149,8 @@ function App() {
   const [imageEl, setImageEl] = useState<HTMLImageElement | null>(null);
   const [processedDataUrl, setProcessedDataUrl] = useState<string | null>(null);
   const [corners, setCorners] = useState<Corner[]>([]);
-  const [dragCorner, setDragCorner] = useState<number | null>(null);
-  const [dragOffset, setDragOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const dragCornerRef = useRef<number | null>(null);
+  const dragOffsetRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
   const [brightness, setBrightness] = useState(110);
   const [contrast, setContrast] = useState(120);
   const [saturation, setSaturation] = useState(100);
@@ -318,7 +318,21 @@ function App() {
 
           {imageEl && (
             <div className="space-y-2">
-              <div ref={overlayRef} className="relative w-full touch-none" style={{ maxWidth: 900 }}>
+              <div
+                ref={overlayRef}
+                className="relative w-full touch-none"
+                style={{ maxWidth: 900 }}
+                onPointerMove={(e) => {
+                  if (dragCornerRef.current === null) return;
+                  moveCornerFromPointer(dragCornerRef.current, e.clientX, e.clientY, dragOffsetRef.current);
+                }}
+                onPointerUp={() => {
+                  dragCornerRef.current = null;
+                }}
+                onPointerCancel={() => {
+                  dragCornerRef.current = null;
+                }}
+              >
                 <canvas ref={canvasRef} className="w-full rounded border bg-white block" />
                 {corners.map((corner, i) => {
                   const leftPct = (corner.x / imageEl.width) * 100;
@@ -335,20 +349,13 @@ function App() {
                         const rect = overlayRef.current.getBoundingClientRect();
                         const cornerX = (corner.x / imageEl.width) * rect.width;
                         const cornerY = (corner.y / imageEl.height) * rect.height;
-                        setDragOffset({
+                        dragOffsetRef.current = {
                           x: (e.clientX - rect.left) - cornerX,
                           y: (e.clientY - rect.top) - cornerY,
-                        });
-                        setDragCorner(i);
-                        (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+                        };
+                        dragCornerRef.current = i;
+                        overlayRef.current.setPointerCapture(e.pointerId);
                       }}
-                      onPointerMove={(e) => {
-                        if (dragCorner !== i) return;
-                        moveCornerFromPointer(i, e.clientX, e.clientY, dragOffset);
-                      }}
-                      onPointerUp={() => setDragCorner(null)}
-                      onPointerCancel={() => setDragCorner(null)}
-                      onPointerLeave={() => setDragCorner(null)}
                     />
                   );
                 })}
