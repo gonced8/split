@@ -203,8 +203,8 @@ function App() {
 
   const [items, setItems] = useState<ReceiptItem[]>([]);
   const [people, setPeople] = useState<Person[]>([
-    { id: uid('p'), name: 'Alex' },
-    { id: uid('p'), name: 'Sam' },
+    { id: uid('p'), name: 'A' },
+    { id: uid('p'), name: 'B' },
   ]);
   const [tipMode, setTipMode] = useState<'percent' | 'fixed'>('percent');
   const [tipValue, setTipValue] = useState(10);
@@ -368,7 +368,7 @@ function App() {
       if (nextCount <= prev.length) return prev;
       const next = [...prev];
       while (next.length < nextCount) {
-        next.push({ id: uid('p'), name: `Person ${next.length + 1}` });
+        next.push({ id: uid('p'), name: String.fromCharCode(65 + next.length) });
       }
       return next;
     });
@@ -396,6 +396,11 @@ function App() {
     }));
   };
 
+  const nextDisabled =
+    step === 1 ||
+    (step === 2 && items.length === 0) ||
+    step === 3;
+
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(94,234,212,0.18),_transparent_28%),linear-gradient(180deg,_#f8fffe_0%,_#eef6f4_45%,_#e7efec_100%)] text-slate-900">
       <div className="mx-auto flex max-w-5xl flex-col gap-4 px-4 pb-28 pt-5 sm:px-6 lg:px-8">
@@ -417,9 +422,9 @@ function App() {
                 </p>
               </div>
               {step !== 1 && (
-                <div className="hidden rounded-3xl bg-slate-950 px-4 py-3 text-right text-white sm:block">
-                  <div className="text-xs uppercase tracking-[0.2em] text-teal-300">Total</div>
-                  <div className="mt-1 text-xl font-semibold">{formatMoney(grandTotal || receiptTotal, currency)}</div>
+                <div className="hidden rounded-3xl border border-teal-200 bg-teal-50 px-4 py-3 text-right sm:block">
+                  <div className="text-xs font-medium uppercase tracking-[0.2em] text-teal-600">Total</div>
+                  <div className="mt-1 text-xl font-semibold text-slate-900">{formatMoney(grandTotal || receiptTotal, currency)}</div>
                 </div>
               )}
             </div>
@@ -463,7 +468,7 @@ function App() {
         </header>
 
         {/* Content */}
-        <div className={`grid gap-4 ${step === 1 ? '' : 'lg:grid-cols-[minmax(0,1fr)_320px]'}`}>
+        <div className={`grid gap-4 ${step === 3 ? 'lg:grid-cols-[minmax(0,1fr)_320px]' : ''}`}>
           <main className="space-y-4">
             <Card className="overflow-hidden border-white/70 bg-white/85">
               <CardContent className="space-y-5 p-5">
@@ -896,46 +901,48 @@ function App() {
                     </div>
                   </div>
                 )}
+
+
               </CardContent>
             </Card>
           </main>
 
-          {/* Sidebar */}
-          {step !== 1 && (
+          {/* Sidebar (split + done: who owes what + allocation progress) */}
+          {step === 3 && (
             <aside className="space-y-4">
-              <Card className="border-slate-900 bg-slate-950 text-white">
-                <CardContent className="space-y-4 p-5">
+              <div className="rounded-[30px] border border-slate-200 bg-white p-5 shadow-[0_18px_50px_rgba(15,23,42,0.07)]">
+                <div className="space-y-4">
                   <div>
-                    <p className="text-xs uppercase tracking-[0.22em] text-teal-300">Summary</p>
-                    <h3 className="mt-1 text-lg font-semibold">Who owes what</h3>
+                    <p className="text-xs font-medium uppercase tracking-[0.22em] text-teal-600">Summary</p>
+                    <h3 className="mt-1 text-lg font-semibold text-slate-900">Who owes what</h3>
                   </div>
                   <div className="grid gap-2">
                     {people.map((person) => (
-                      <div key={person.id} className="rounded-2xl bg-white/8 p-4">
-                        <div className="text-sm text-slate-300">{person.name}</div>
-                        <div className="mt-1 text-2xl font-semibold">{formatMoney(personTotals[person.id] || 0, currency)}</div>
+                      <div key={person.id} className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
+                        <div className="text-sm text-slate-500">{person.name}</div>
+                        <div className="mt-1 text-2xl font-semibold text-slate-900">{formatMoney(personTotals[person.id] || 0, currency)}</div>
                       </div>
                     ))}
                   </div>
-                  <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-sm text-slate-300">
+                  <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 text-sm text-slate-500">
                     <div className="flex items-center justify-between">
                       <span>Subtotal</span>
-                      <span>{formatMoney(subtotal, currency)}</span>
+                      <span className="text-slate-700">{formatMoney(subtotal, currency)}</span>
                     </div>
                     <div className="mt-2 flex items-center justify-between">
                       <span>Tip</span>
-                      <span>{formatMoney(tipAmount, currency)}</span>
+                      <span className="text-slate-700">{formatMoney(tipAmount, currency)}</span>
                     </div>
-                    <div className="mt-2 flex items-center justify-between font-semibold text-white">
+                    <div className="mt-2 flex items-center justify-between border-t border-slate-200 pt-2 font-semibold text-slate-900">
                       <span>Total</span>
                       <span>{formatMoney(grandTotal, currency)}</span>
                     </div>
                   </div>
-                </CardContent>
-              </Card>
+                </div>
+              </div>
 
               {step === 3 && (
-                <Card className="border-white/70 bg-white/80">
+                <Card className="border-white/70">
                   <CardContent className="space-y-3 p-5">
                     <div className="flex items-center justify-between text-sm text-slate-600">
                       <span>Allocation</span>
@@ -976,7 +983,7 @@ function App() {
           <Button
             type="button"
             className="h-11 min-w-[6rem] rounded-2xl sm:h-12 sm:min-w-[7.5rem]"
-            disabled={(step === 1) || (step === 2 && items.length === 0) || step === 3}
+            disabled={nextDisabled}
             onClick={() => setStep((current) => Math.min(3, current + 1) as Step)}
           >
             Next <ChevronRight className="ml-1 size-4" />
