@@ -1,4 +1,4 @@
-const GEMINI_MODEL = 'gemini-2.5-flash-lite';
+const GEMINI_MODEL = 'gemini-3.1-flash-lite-preview';
 const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
 const SYSTEM_PROMPT = `You are a receipt parser. Given an image of a receipt, extract all line items and the total.
@@ -70,8 +70,15 @@ export default {
       });
 
       if (!geminiRes.ok) {
-        const err = await geminiRes.text();
-        return new Response(JSON.stringify({ error: `Gemini error: ${err}` }), {
+        const errText = await geminiRes.text();
+        let message = errText;
+        try {
+          const errJson = JSON.parse(errText) as { error?: { message?: string } };
+          if (errJson?.error?.message) message = errJson.error.message;
+        } catch {
+          message = errText || `Gemini error (${geminiRes.status})`;
+        }
+        return new Response(JSON.stringify({ error: message }), {
           status: geminiRes.status,
           headers: { 'Content-Type': 'application/json', ...corsHeaders(origin) },
         });

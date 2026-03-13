@@ -19,15 +19,19 @@ Receipt splitting web app (React + TypeScript + Vite + Tailwind + shadcn-style U
 - React + TypeScript + Vite
 - TailwindCSS
 - shadcn-style local UI components (`src/components/ui/*`)
-- Cloudflare Worker proxy → Google Gemini API (`gemini-2.0-flash-lite`)
+- Cloudflare Worker proxy → Google Gemini API (`gemini-3.1-flash-lite-preview`)
 
 ## Run locally
 
 ```bash
 npm install
-cp .env.example .env          # then edit VITE_PROXY_URL
+cp .env.example .env          # then edit (see below)
 npm run dev
 ```
+
+**Option A – Proxy (production-like):** Set `VITE_PROXY_URL` to your Worker URL. The Worker must allow your dev origin (e.g. `http://localhost:5173`) in `ALLOWED_ORIGIN`, which opens the endpoint to anyone using that origin.
+
+**Option B – Direct API key (recommended for dev):** Set `VITE_GEMINI_API_KEY` in `.env` (get a key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey)). The app will call Gemini directly and skip the Worker, so you don’t add localhost to the Worker. In Google Cloud, restrict that key to **HTTP referrers** `http://localhost:*` (and optionally your production domain).
 
 ## Build
 
@@ -59,11 +63,9 @@ The worker URL will be printed (e.g. `https://split-proxy.<your-subdomain>.worke
 
 ### 2. Configure the frontend
 
-**For local dev**, create `.env`:
-
-```bash
-VITE_PROXY_URL=https://split-proxy.your-subdomain.workers.dev
-```
+**For local dev**, create `.env` with either:
+- `VITE_PROXY_URL=https://split-proxy.your-subdomain.workers.dev` (and allow localhost in the Worker), or
+- `VITE_GEMINI_API_KEY=your_key` (direct call; restrict the key to localhost in Google Cloud).
 
 **For GitHub Pages**, go to your repo:
 
