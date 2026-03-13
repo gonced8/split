@@ -5,6 +5,7 @@ import {
   ChevronRight,
   Loader2,
   Plus,
+  ImageIcon,
   ReceiptText,
   ScanLine,
   Sparkles,
@@ -551,11 +552,11 @@ function App() {
 
                 {step === 1 && (
                   <div className="space-y-5">
-                    <div className="grid gap-3 sm:grid-cols-2">
+                    <div className="grid gap-3 sm:grid-cols-3">
                       <label className="flex cursor-pointer items-center justify-between rounded-3xl border border-slate-200 bg-slate-50 px-4 py-4 text-left transition hover:border-teal-300 hover:bg-white">
                         <div>
-                          <p className="text-sm font-semibold text-slate-900">Choose a receipt photo</p>
-                          <p className="text-xs text-slate-500">Camera capture is enabled for iPhone.</p>
+                          <p className="text-sm font-semibold text-slate-900">Take photo</p>
+                          <p className="text-xs text-slate-500">Opens camera directly on mobile.</p>
                         </div>
                         <div className="flex size-11 items-center justify-center rounded-2xl bg-teal-600 text-white">
                           <Camera className="size-5" />
@@ -564,6 +565,22 @@ function App() {
                           type="file"
                           accept="image/*"
                           capture="environment"
+                          className="hidden"
+                          onChange={(e) => onFile(e.target.files?.[0])}
+                        />
+                      </label>
+
+                      <label className="flex cursor-pointer items-center justify-between rounded-3xl border border-slate-200 bg-slate-50 px-4 py-4 text-left transition hover:border-teal-300 hover:bg-white">
+                        <div>
+                          <p className="text-sm font-semibold text-slate-900">Upload photo</p>
+                          <p className="text-xs text-slate-500">Pick from photo library/files.</p>
+                        </div>
+                        <div className="flex size-11 items-center justify-center rounded-2xl bg-slate-700 text-white">
+                          <ImageIcon className="size-5" />
+                        </div>
+                        <input
+                          type="file"
+                          accept="image/*"
                           className="hidden"
                           onChange={(e) => onFile(e.target.files?.[0])}
                         />
