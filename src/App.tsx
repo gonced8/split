@@ -6,8 +6,10 @@ import {
   Loader2,
   Plus,
   ReceiptText,
+  ScanLine,
   Sparkles,
   Users,
+  WandSparkles,
   X,
   Check,
 } from 'lucide-react';
@@ -195,6 +197,9 @@ function App() {
   const [extracting, setExtracting] = useState(false);
   const [extractError, setExtractError] = useState<string | null>(null);
   const [currency, setCurrency] = useState('€');
+  const [brightness, setBrightness] = useState(100);
+  const [contrast, setContrast] = useState(100);
+  const [saturation, setSaturation] = useState(100);
 
   const [items, setItems] = useState<ReceiptItem[]>([]);
   const [people, setPeople] = useState<Person[]>([
@@ -295,6 +300,27 @@ function App() {
     setCorners((prev) => prev.map((corner, index) => (index === cornerIndex ? { x, y } : corner)));
   };
 
+  const applyFilterToDataUrl = (dataUrl: string): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const c = document.createElement('canvas');
+        c.width = img.naturalWidth;
+        c.height = img.naturalHeight;
+        const ctx = c.getContext('2d');
+        if (!ctx) {
+          reject(new Error('No canvas context'));
+          return;
+        }
+        ctx.filter = `brightness(${brightness}%) contrast(${contrast}%) saturate(${saturation}%)`;
+        ctx.drawImage(img, 0, 0);
+        resolve(c.toDataURL('image/jpeg', 0.85));
+      };
+      img.onerror = () => reject(new Error('Failed to load image'));
+      img.src = dataUrl;
+    });
+  };
+
   const extractItems = async () => {
     if (!imageEl || corners.length !== 4) return;
 
@@ -305,7 +331,8 @@ function App() {
       const flattenedUrl = flattenImage(imageEl, corners);
       if (!flattenedUrl) throw new Error('Failed to process image.');
 
-      const result = await parseReceiptWithGemini(flattenedUrl);
+      const filteredUrl = await applyFilterToDataUrl(flattenedUrl);
+      const result = await parseReceiptWithGemini(filteredUrl);
       setCurrency(result.currency === 'USD' ? '$' : result.currency === 'GBP' ? '£' : '€');
       setDetectedTotal(result.total);
 
@@ -489,7 +516,14 @@ function App() {
                               dragCornerRef.current = null;
                             }}
                           >
-                            <canvas ref={canvasRef} className="block w-full rounded-[20px]" />
+                            <div
+                              className="block w-full rounded-[20px]"
+                              style={{
+                                filter: `brightness(${brightness}%) contrast(${contrast}%) saturate(${saturation}%)`,
+                              }}
+                            >
+                              <canvas ref={canvasRef} className="block w-full rounded-[20px]" />
+                            </div>
                             {corners.map((corner, index) => {
                               const leftPct = (corner.x / imageEl.width) * 100;
                               const topPct = (corner.y / imageEl.height) * 100;
@@ -516,6 +550,71 @@ function App() {
                                 />
                               );
                             })}
+                          </div>
+                        </div>
+
+                        {/* Brightness / contrast / saturation */}
+                        <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
+                          <p className="mb-3 text-sm font-semibold text-slate-900">Adjust image</p>
+                          <div className="mb-3 flex flex-wrap gap-2">
+                            <Button
+                              type="button"
+                              variant="outline"
+                              className="rounded-2xl"
+                              onClick={() => {
+                                setBrightness(102);
+                                setContrast(118);
+                                setSaturation(100);
+                              }}
+                            >
+                              Natural
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              className="rounded-2xl"
+                              onClick={() => {
+                                setBrightness(110);
+                                setContrast(145);
+                                setSaturation(40);
+                              }}
+                            >
+                              <ScanLine className="mr-2 size-4" /> High contrast
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              className="rounded-2xl"
+                              onClick={() => {
+                                setBrightness(118);
+                                setContrast(128);
+                                setSaturation(0);
+                              }}
+                            >
+                              <WandSparkles className="mr-2 size-4" /> Faded paper
+                            </Button>
+                          </div>
+                          <div className="grid gap-3 sm:grid-cols-3">
+                            {[
+                              { label: 'Brightness', value: brightness, setValue: setBrightness, min: 50, max: 200 },
+                              { label: 'Contrast', value: contrast, setValue: setContrast, min: 50, max: 200 },
+                              { label: 'Saturation', value: saturation, setValue: setSaturation, min: 0, max: 100 },
+                            ].map(({ label, value, setValue, min, max }) => (
+                              <label key={label} className="text-sm font-medium text-slate-700">
+                                <div className="mb-2 flex items-center justify-between">
+                                  <span>{label}</span>
+                                  <span className="text-xs text-slate-500">{value}%</span>
+                                </div>
+                                <input
+                                  type="range"
+                                  className="h-2 w-full cursor-pointer appearance-none rounded-full bg-slate-200"
+                                  min={min}
+                                  max={max}
+                                  value={value}
+                                  onChange={(e) => setValue(Number(e.target.value))}
+                                />
+                              </label>
+                            ))}
                           </div>
                         </div>
 
@@ -564,58 +663,92 @@ function App() {
                 {/* Step 2: Review */}
                 {step === 2 && (
                   <div className="space-y-4">
-                    <div className="grid gap-3 sm:grid-cols-3">
-                      <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
-                        <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Items</p>
-                        <p className="mt-2 text-2xl font-semibold text-slate-950">{items.length}</p>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                        <p className="text-xs font-medium uppercase tracking-wider text-slate-500">Items</p>
+                        <p className="mt-1 text-2xl font-semibold text-slate-950">{items.length}</p>
                       </div>
-                      <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
-                        <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Subtotal</p>
-                        <p className="mt-2 text-2xl font-semibold text-slate-950">{formatMoney(subtotal, currency)}</p>
-                      </div>
-                      <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
-                        <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Receipt total</p>
-                        <p className="mt-2 text-2xl font-semibold text-slate-950">{formatMoney(receiptTotal, currency)}</p>
+                      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                        <p className="text-xs font-medium uppercase tracking-wider text-slate-500">Total</p>
+                        <p className="mt-1 text-2xl font-semibold text-slate-950">{formatMoney(receiptTotal, currency)}</p>
                       </div>
                     </div>
 
-                    <div className="space-y-3">
-                      {items.map((item, index) => (
-                        <div key={item.id} className="rounded-[22px] border border-slate-200 bg-slate-50/80 p-4">
-                          <div className="mb-3 flex items-center justify-between">
-                            <p className="text-sm font-semibold text-slate-900">Item {index + 1}</p>
-                            <button
-                              type="button"
-                              className="rounded-full p-2 text-slate-400 transition hover:bg-white hover:text-rose-600"
-                              onClick={() => removeItem(item.id)}
-                            >
-                              <X className="size-4" />
-                            </button>
-                          </div>
-                          <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_100px_110px]">
-                            <Input value={item.name} onChange={(e) => updateItem(item.id, { name: e.target.value })} placeholder="Name" />
-                            <Input
-                              type="number"
-                              step="0.1"
-                              min="0"
-                              value={item.quantity}
-                              onChange={(e) => updateItem(item.id, { quantity: Number(e.target.value || 0) })}
-                              placeholder="Qty"
-                            />
-                            <Input
-                              type="number"
-                              step="0.01"
-                              min="0"
-                              value={item.price}
-                              onChange={(e) => updateItem(item.id, { price: Number(e.target.value || 0) })}
-                              placeholder="Price"
-                            />
-                          </div>
-                          <p className="mt-2 text-sm text-slate-500">
-                            Line total: {formatMoney(item.quantity * item.price, currency)}
-                          </p>
-                        </div>
-                      ))}
+                    {detectedTotal > 0 && Math.abs(subtotal - detectedTotal) > 0.02 && (
+                      <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                        <p className="font-medium">Total doesn’t match</p>
+                        <p className="mt-1 text-amber-700">
+                          Extracted total from receipt is {formatMoney(detectedTotal, currency)}, but the sum of items is {formatMoney(subtotal, currency)}. Check the table and fix any missing or wrong lines.
+                        </p>
+                      </div>
+                    )}
+
+                    <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
+                      <div className="overflow-x-auto">
+                        <table className="w-full min-w-[32rem] border-collapse text-left text-sm">
+                          <thead>
+                            <tr className="border-b border-slate-200 bg-slate-50/80">
+                              <th className="w-10 px-4 py-3 text-xs font-semibold uppercase tracking-wider text-slate-500">#</th>
+                              <th className="px-4 py-3 text-xs font-semibold uppercase tracking-wider text-slate-500">Product</th>
+                              <th className="w-24 px-4 py-3 text-xs font-semibold uppercase tracking-wider text-slate-500">Qty</th>
+                              <th className="w-28 px-4 py-3 text-xs font-semibold uppercase tracking-wider text-slate-500">Unit price</th>
+                              <th className="w-28 px-4 py-3 text-right text-xs font-semibold uppercase tracking-wider text-slate-500">Line total</th>
+                              <th className="w-12 px-2 py-3" aria-label="Remove" />
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {items.map((item, index) => (
+                              <tr
+                                key={item.id}
+                                className="border-b border-slate-100 transition-colors last:border-b-0 hover:bg-slate-50/50"
+                              >
+                                <td className="px-4 py-2.5 text-slate-400">{index + 1}</td>
+                                <td className="px-4 py-2">
+                                  <Input
+                                    value={item.name}
+                                    onChange={(e) => updateItem(item.id, { name: e.target.value })}
+                                    placeholder="Product name"
+                                    className="h-10 border-slate-200 bg-white text-slate-900"
+                                  />
+                                </td>
+                                <td className="px-4 py-2">
+                                  <Input
+                                    type="number"
+                                    step="0.1"
+                                    min="0"
+                                    value={item.quantity}
+                                    onChange={(e) => updateItem(item.id, { quantity: Number(e.target.value || 0) })}
+                                    className="h-10 border-slate-200 bg-white text-slate-900"
+                                  />
+                                </td>
+                                <td className="px-4 py-2">
+                                  <Input
+                                    type="number"
+                                    step="0.01"
+                                    min="0"
+                                    value={item.price}
+                                    onChange={(e) => updateItem(item.id, { price: Number(e.target.value || 0) })}
+                                    className="h-10 border-slate-200 bg-white text-slate-900"
+                                  />
+                                </td>
+                                <td className="px-4 py-2.5 text-right font-medium text-slate-700">
+                                  {formatMoney(item.quantity * item.price, currency)}
+                                </td>
+                                <td className="px-2 py-2">
+                                  <button
+                                    type="button"
+                                    className="rounded-full p-2 text-slate-400 transition hover:bg-rose-50 hover:text-rose-600"
+                                    onClick={() => removeItem(item.id)}
+                                    aria-label={`Remove ${item.name}`}
+                                  >
+                                    <X className="size-4" />
+                                  </button>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
                     </div>
 
                     <div className="flex flex-col gap-2 sm:flex-row">
@@ -625,7 +758,7 @@ function App() {
                         className="h-12 rounded-2xl"
                         onClick={() => setItems((prev) => [...prev, { id: uid('item'), name: 'New item', quantity: 1, price: 0 }])}
                       >
-                        <Plus className="mr-2 size-4" /> Add item
+                        <Plus className="mr-2 size-4" /> Add row
                       </Button>
                       <Button type="button" className="h-12 rounded-2xl" onClick={() => setStep(3)}>
                         Continue to split <ChevronRight className="ml-2 size-4" />
