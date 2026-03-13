@@ -5,8 +5,14 @@ export function uid(prefix: string) {
 }
 
 export function parsePrice(raw: string) {
-  const normalized = raw.replace(/[^\d,.-]/g, '').replace(/\.(?=\d{3}\b)/g, '').replace(',', '.');
-  const value = Number(normalized);
+  let s = raw.replace(/[^\d,.\s-]/g, '').trim();
+  // European style: 1.234,56 (thousands dot, decimal comma)
+  if (/^\d{1,3}(\.\d{3})*,\d{2}$/.test(s)) {
+    s = s.replace(/\./g, '').replace(',', '.');
+  } else {
+    s = s.replace(/\.(?=\d{3}\b)/g, '').replace(',', '.');
+  }
+  const value = Number(s);
   return Number.isFinite(value) ? value : NaN;
 }
 
@@ -31,20 +37,27 @@ function sanitizeItemName(raw: string) {
 }
 
 function isIgnoredLine(name: string) {
-  return /(total|subtotal|sub total|tax|troco|change|iva|vat|mbway|visa|mastercard|cash|multibanco|card|payment|paid|balance|service charge|tip)/i.test(
-    name,
+  const lower = name.toLowerCase().trim();
+  // Only ignore if the line *starts with* a summary/payment keyword (so "Chicken total wrap" is kept)
+  return /^(total|subtotal|sub total|tax|troco|change|iva|vat|mbway|visa|mastercard|cash|multibanco|card|payment|paid|balance|service charge|tip)\b/i.test(
+    lower,
   );
 }
 
 function extractAmount(line: string) {
-  const match = line.match(/([€$]?\s*[-]?\d{1,4}(?:[.,]\d{2}))\s*$/);
+  // Prefer amount at end of line; allow 1–5 digits + optional decimals (e.g. 12.99 or 12)
+  let match = line.match(/([€$]?\s*[-]?\d{1,5}(?:[.,]\d{1,2})?)\s*$/);
+  if (!match) {
+    // Fallback: last number that looks like a price (optional €/$ and 1–2 decimals)
+    match = line.match(/([€$]?\s*[-]?\d{1,5}(?:[.,]\d{1,2})?)(?=\s*$|[^\d,.]|$)/);
+  }
   if (!match) return null;
   const value = parsePrice(match[1]);
-  return Number.isNaN(value) ? null : { raw: match[1], value };
+  return Number.isNaN(value) ? null : { raw: match[1].trim(), value };
 }
 
 function extractQuantityPrefix(line: string) {
-  const match = line.match(/^(\d+(?:[.,]\d+)?)\s*[x×]\s+(.+)$/i);
+  const match = line.match(/^(\d+(?:[.,]\d+)?)\s*[x×]\s*(.+)$/i);
   if (!match) return null;
   const quantity = parsePrice(match[1]);
   if (Number.isNaN(quantity) || quantity <= 0) return null;
@@ -66,7 +79,7 @@ export function parseReceipt(text: string): { items: ReceiptItem[]; total: numbe
       next &&
       /[A-Za-z]/.test(current) &&
       !extractAmount(current) &&
-      /^[€$]?\s*\d{1,4}(?:[.,]\d{2})$/.test(next)
+      /^[€$]?\s*\d{1,5}(?:[.,]\d{1,2})?$/.test(next.trim())
     ) {
       lines.push(`${current} ${next}`);
       i += 1;
@@ -80,15 +93,15 @@ export function parseReceipt(text: string): { items: ReceiptItem[]; total: numbe
 
   for (const line of lines) {
     const totalMatch = line.match(
-      /(?:^|\s)(grand total|total|tot(?:al)?\.?|amount due|montante|a pagar)\s*[:€$ ]*([0-9]+[.,][0-9]{2})/i,
+      /(?:^|\s)(grand total|total\s+(?:geral|a pagar|due)?|tot(?:al)?\.?|amount due|montante|a pagar|suma?)\s*[:€$\s]*([0-9][0-9.,]*)/i,
     );
     if (totalMatch) {
       const maybeTotal = parsePrice(totalMatch[2]);
-      if (!Number.isNaN(maybeTotal)) total = Math.max(total, maybeTotal);
+      if (!Number.isNaN(maybeTotal) && maybeTotal > 0) total = Math.max(total, maybeTotal);
       continue;
     }
 
-    if (/(subtotal|sub total|tax|iva|vat|tip|service charge)/i.test(line)) {
+    if (/^(subtotal|sub total|tax|iva|vat|tip|service charge)\s*[:€$\s]*\d/i.test(line.trim())) {
       continue;
     }
 

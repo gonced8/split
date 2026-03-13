@@ -3,9 +3,9 @@ import { describe, expect, it } from 'vitest';
 import App from './App';
 
 describe('App wizard', () => {
-  it('starts in step 1 and disables next before processing image', () => {
+  it('starts in step 1 with upload prompt and disabled next', () => {
     render(<App />);
-    expect(screen.getAllByText(/Scan receipt/i)[0]).toBeInTheDocument();
+    expect(screen.getByText(/Take a photo or upload a receipt/i)).toBeInTheDocument();
     const next = screen.getByRole('button', { name: /next/i });
     expect(next).toBeDisabled();
   });

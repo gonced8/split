@@ -6,34 +6,33 @@ import {
   Loader2,
   Plus,
   ReceiptText,
-  ScanLine,
   Sparkles,
   Users,
-  WandSparkles,
   X,
+  Check,
 } from 'lucide-react';
-import Tesseract from 'tesseract.js';
 import { Button } from './components/ui/button';
 import { Card, CardContent } from './components/ui/card';
 import { Input } from './components/ui/input';
-import { parseReceipt, type ReceiptItem, uid } from './lib/receipt';
+import { type ReceiptItem, uid } from './lib/receipt';
 import { computeSplitTotals, type Person } from './lib/split';
+import { parseReceiptWithGemini } from './lib/gemini';
 
 type Corner = { x: number; y: number };
 type Step = 1 | 2 | 3;
 
 const stepMeta: Record<Step, { label: string; title: string; icon: typeof Camera }> = {
-  1: { label: 'Capture', title: 'Scan receipt', icon: Camera },
-  2: { label: 'Review', title: 'Fix extracted items', icon: ReceiptText },
-  3: { label: 'Split', title: 'Share the bill', icon: Users },
+  1: { label: 'Scan', title: 'Upload receipt', icon: Camera },
+  2: { label: 'Review', title: 'Check items', icon: ReceiptText },
+  3: { label: 'Split', title: 'Divide the bill', icon: Users },
 };
 
 function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
 }
 
-function formatMoney(value: number) {
-  return `€${value.toFixed(2)}`;
+function formatMoney(value: number, currency = '€') {
+  return `${currency}${value.toFixed(2)}`;
 }
 
 function solveLinear(A: number[][], b: number[]) {
@@ -125,106 +124,77 @@ function bilinearSample(data: Uint8ClampedArray, w: number, h: number, x: number
   return out;
 }
 
-async function buildOcrVariants(inputDataUrl: string) {
-  return new Promise<string[]>((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => {
-      const scale = Math.max(2, 2200 / Math.max(img.width, 1));
-      const w = Math.round(img.width * scale);
-      const h = Math.round(img.height * scale);
+function flattenImage(
+  imageEl: HTMLImageElement,
+  corners: Corner[],
+): string | null {
+  if (corners.length !== 4) return null;
 
-      const baseCanvas = document.createElement('canvas');
-      baseCanvas.width = w;
-      baseCanvas.height = h;
-      const ctx = baseCanvas.getContext('2d');
-      if (!ctx) return reject(new Error('No canvas context'));
+  const width = Math.max(
+    640,
+    Math.round(
+      (Math.hypot(corners[1].x - corners[0].x, corners[1].y - corners[0].y) +
+        Math.hypot(corners[2].x - corners[3].x, corners[2].y - corners[3].y)) /
+        2,
+    ),
+  );
+  const height = Math.max(
+    900,
+    Math.round(
+      (Math.hypot(corners[3].x - corners[0].x, corners[3].y - corners[0].y) +
+        Math.hypot(corners[2].x - corners[1].x, corners[2].y - corners[1].y)) /
+        2,
+    ),
+  );
 
-      ctx.filter = 'contrast(130%) brightness(108%) saturate(0%)';
-      ctx.drawImage(img, 0, 0, w, h);
-      ctx.filter = 'none';
-      const imageData = ctx.getImageData(0, 0, w, h);
-      const d = imageData.data;
-      let minGray = 255;
-      let maxGray = 0;
-      let sumGray = 0;
+  const srcCanvas = document.createElement('canvas');
+  srcCanvas.width = imageEl.width;
+  srcCanvas.height = imageEl.height;
+  const srcCtx = srcCanvas.getContext('2d');
+  if (!srcCtx) return null;
+  srcCtx.drawImage(imageEl, 0, 0);
+  const srcData = srcCtx.getImageData(0, 0, srcCanvas.width, srcCanvas.height);
 
-      for (let i = 0; i < d.length; i += 4) {
-        const gray = Math.round(0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2]);
-        minGray = Math.min(minGray, gray);
-        maxGray = Math.max(maxGray, gray);
-        sumGray += gray;
-      }
+  const dstCanvas = document.createElement('canvas');
+  dstCanvas.width = width;
+  dstCanvas.height = height;
+  const dstCtx = dstCanvas.getContext('2d');
+  if (!dstCtx) return null;
 
-      const meanGray = sumGray / (d.length / 4);
-      const contrastRange = Math.max(1, maxGray - minGray);
-      const adaptiveThreshold = clamp(meanGray * 0.92, 115, 205);
+  const H = getHomography(corners, [
+    { x: 0, y: 0 },
+    { x: width - 1, y: 0 },
+    { x: width - 1, y: height - 1 },
+    { x: 0, y: height - 1 },
+  ]);
+  const Hinv = invert3x3(H);
+  const out = dstCtx.createImageData(width, height);
 
-      const normalized = ctx.createImageData(w, h);
-      const binary = ctx.createImageData(w, h);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const p = project(Hinv, x, y);
+      const [r, g, b, a] = bilinearSample(srcData.data, srcCanvas.width, srcCanvas.height, p.x, p.y);
+      const idx = (y * width + x) * 4;
+      out.data[idx] = r;
+      out.data[idx + 1] = g;
+      out.data[idx + 2] = b;
+      out.data[idx + 3] = a;
+    }
+  }
 
-      for (let i = 0; i < d.length; i += 4) {
-        const gray = 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
-        const stretched = clamp(((gray - minGray) / contrastRange) * 255, 0, 255);
-        const sharpened = clamp(gray + (gray - meanGray) * 0.25, 0, 255);
-        const normalizedGray = Math.round(stretched * 0.6 + sharpened * 0.4);
-        const bw = normalizedGray > adaptiveThreshold ? 255 : 0;
-
-        normalized.data[i] = normalizedGray;
-        normalized.data[i + 1] = normalizedGray;
-        normalized.data[i + 2] = normalizedGray;
-        normalized.data[i + 3] = 255;
-
-        binary.data[i] = bw;
-        binary.data[i + 1] = bw;
-        binary.data[i + 2] = bw;
-        binary.data[i + 3] = 255;
-      }
-
-      const grayscaleCanvas = document.createElement('canvas');
-      grayscaleCanvas.width = w;
-      grayscaleCanvas.height = h;
-      grayscaleCanvas.getContext('2d')?.putImageData(normalized, 0, 0);
-
-      const binaryCanvas = document.createElement('canvas');
-      binaryCanvas.width = w;
-      binaryCanvas.height = h;
-      binaryCanvas.getContext('2d')?.putImageData(binary, 0, 0);
-
-      resolve([
-        binaryCanvas.toDataURL('image/png'),
-        grayscaleCanvas.toDataURL('image/png'),
-        baseCanvas.toDataURL('image/png'),
-        inputDataUrl,
-      ]);
-    };
-    img.onerror = () => reject(new Error('Failed to load image for OCR preprocess'));
-    img.src = inputDataUrl;
-  });
-}
-
-function scoreParsedReceipt(parsed: { items: ReceiptItem[]; total: number }) {
-  const subtotal = parsed.items.reduce((sum, item) => sum + item.price * item.quantity, 0);
-  const nameScore = parsed.items.reduce((sum, item) => sum + Math.min(item.name.length, 22), 0);
-  const totalScore = parsed.total > 0 ? 18 : 0;
-  const countScore = parsed.items.length * 24;
-  const deltaPenalty = parsed.total > 0 ? Math.min(Math.abs(parsed.total - subtotal) * 12, 24) : 0;
-  return countScore + nameScore + totalScore - deltaPenalty;
+  dstCtx.putImageData(out, 0, 0);
+  return dstCanvas.toDataURL('image/jpeg', 0.85);
 }
 
 function App() {
   const [step, setStep] = useState<Step>(1);
   const [imageEl, setImageEl] = useState<HTMLImageElement | null>(null);
-  const [processedDataUrl, setProcessedDataUrl] = useState<string | null>(null);
   const [corners, setCorners] = useState<Corner[]>([]);
   const dragCornerRef = useRef<number | null>(null);
   const dragOffsetRef = useRef({ x: 0, y: 0 });
-  const [brightness, setBrightness] = useState(108);
-  const [contrast, setContrast] = useState(132);
-  const [saturation, setSaturation] = useState(85);
-  const [ocrLoading, setOcrLoading] = useState(false);
-  const [ocrError, setOcrError] = useState<string | null>(null);
-  const [ocrText, setOcrText] = useState('');
-  const [detectedTotal, setDetectedTotal] = useState(0);
+  const [extracting, setExtracting] = useState(false);
+  const [extractError, setExtractError] = useState<string | null>(null);
+  const [currency, setCurrency] = useState('€');
 
   const [items, setItems] = useState<ReceiptItem[]>([]);
   const [people, setPeople] = useState<Person[]>([
@@ -234,6 +204,7 @@ function App() {
   const [tipMode, setTipMode] = useState<'percent' | 'fixed'>('percent');
   const [tipValue, setTipValue] = useState(10);
   const [alloc, setAlloc] = useState<Record<string, Record<string, number>>>({});
+  const [detectedTotal, setDetectedTotal] = useState(0);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
@@ -264,12 +235,10 @@ function App() {
 
   const onFile = (file?: File) => {
     if (!file) return;
-    setOcrError(null);
-    setOcrText('');
+    setExtractError(null);
     setItems([]);
     setAlloc({});
     setDetectedTotal(0);
-    setProcessedDataUrl(null);
     const url = URL.createObjectURL(file);
     const img = new Image();
     img.onload = () => {
@@ -295,14 +264,12 @@ function App() {
     if (!ctx) return;
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.filter = `brightness(${brightness}%) contrast(${contrast}%) saturate(${saturation}%)`;
     ctx.drawImage(imageEl, 0, 0, canvas.width, canvas.height);
-    ctx.filter = 'none';
 
     if (corners.length === 4) {
       const scaled = corners.map((corner) => ({ x: corner.x * scale, y: corner.y * scale }));
       ctx.strokeStyle = '#14b8a6';
-      ctx.fillStyle = 'rgba(20, 184, 166, 0.14)';
+      ctx.fillStyle = 'rgba(20, 184, 166, 0.10)';
       ctx.lineWidth = 2;
       ctx.beginPath();
       scaled.forEach((corner, index) => (index ? ctx.lineTo(corner.x, corner.y) : ctx.moveTo(corner.x, corner.y)));
@@ -310,7 +277,7 @@ function App() {
       ctx.fill();
       ctx.stroke();
     }
-  }, [imageEl, corners, brightness, contrast, saturation]);
+  }, [imageEl, corners]);
 
   const moveCornerFromPointer = (
     cornerIndex: number,
@@ -328,104 +295,31 @@ function App() {
     setCorners((prev) => prev.map((corner, index) => (index === cornerIndex ? { x, y } : corner)));
   };
 
-  const flattenAndEnhance = () => {
+  const extractItems = async () => {
     if (!imageEl || corners.length !== 4) return;
 
-    const width = Math.max(
-      640,
-      Math.round(
-        (Math.hypot(corners[1].x - corners[0].x, corners[1].y - corners[0].y) +
-          Math.hypot(corners[2].x - corners[3].x, corners[2].y - corners[3].y)) /
-          2,
-      ),
-    );
-    const height = Math.max(
-      900,
-      Math.round(
-        (Math.hypot(corners[3].x - corners[0].x, corners[3].y - corners[0].y) +
-          Math.hypot(corners[2].x - corners[1].x, corners[2].y - corners[1].y)) /
-          2,
-      ),
-    );
-
-    const srcCanvas = document.createElement('canvas');
-    srcCanvas.width = imageEl.width;
-    srcCanvas.height = imageEl.height;
-    const srcCtx = srcCanvas.getContext('2d');
-    if (!srcCtx) return;
-    srcCtx.drawImage(imageEl, 0, 0);
-    const srcData = srcCtx.getImageData(0, 0, srcCanvas.width, srcCanvas.height);
-
-    const dstCanvas = document.createElement('canvas');
-    dstCanvas.width = width;
-    dstCanvas.height = height;
-    const dstCtx = dstCanvas.getContext('2d');
-    if (!dstCtx) return;
-
-    const H = getHomography(corners, [
-      { x: 0, y: 0 },
-      { x: width - 1, y: 0 },
-      { x: width - 1, y: height - 1 },
-      { x: 0, y: height - 1 },
-    ]);
-    const Hinv = invert3x3(H);
-    const out = dstCtx.createImageData(width, height);
-
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        const p = project(Hinv, x, y);
-        const [r, g, b, a] = bilinearSample(srcData.data, srcCanvas.width, srcCanvas.height, p.x, p.y);
-        const idx = (y * width + x) * 4;
-        out.data[idx] = r;
-        out.data[idx + 1] = g;
-        out.data[idx + 2] = b;
-        out.data[idx + 3] = a;
-      }
-    }
-
-    dstCtx.putImageData(out, 0, 0);
-    dstCtx.filter = `brightness(${brightness}%) contrast(${contrast}%) saturate(${saturation}%)`;
-    dstCtx.drawImage(dstCanvas, 0, 0);
-    setProcessedDataUrl(dstCanvas.toDataURL('image/png'));
-  };
-
-  const runOcr = async () => {
-    if (!processedDataUrl) return;
-    setOcrLoading(true);
-    setOcrError(null);
+    setExtracting(true);
+    setExtractError(null);
 
     try {
-      const variants = await buildOcrVariants(processedDataUrl);
-      const attempts = [];
+      const flattenedUrl = flattenImage(imageEl, corners);
+      if (!flattenedUrl) throw new Error('Failed to process image.');
 
-      for (const variant of variants) {
-        const result = await Tesseract.recognize(variant, 'eng+por');
-        const parsed = parseReceipt(result.data.text);
-        attempts.push({ parsed, text: result.data.text });
-        if (parsed.items.length >= 4) break;
+      const result = await parseReceiptWithGemini(flattenedUrl);
+      setCurrency(result.currency === 'USD' ? '$' : result.currency === 'GBP' ? '£' : '€');
+      setDetectedTotal(result.total);
+
+      if (!result.items.length) {
+        setExtractError('No items detected. You can add them manually.');
+        setItems([{ id: uid('item'), name: 'New item', quantity: 1, price: 0 }]);
+      } else {
+        setItems(result.items);
       }
-
-      const best = attempts
-        .map((attempt) => ({ ...attempt, score: scoreParsedReceipt(attempt.parsed) }))
-        .sort((a, b) => b.score - a.score)[0];
-
-      if (!best) throw new Error('No OCR attempts completed');
-
-      setOcrText(best.text);
-      setDetectedTotal(best.parsed.total);
-
-      if (!best.parsed.items.length) {
-        setOcrError('Could not detect line items. The raw text is available below and you can still add items manually.');
-      }
-
-      setItems(
-        best.parsed.items.length ? best.parsed.items : [{ id: uid('item'), name: 'Manual item', quantity: 1, price: 0 }],
-      );
       setStep(2);
-    } catch {
-      setOcrError('OCR failed on this image. Try recropping the receipt, switching to high contrast, and extracting again.');
+    } catch (err) {
+      setExtractError(err instanceof Error ? err.message : 'Extraction failed. Try again.');
     } finally {
-      setOcrLoading(false);
+      setExtracting(false);
     }
   };
 
@@ -454,10 +348,9 @@ function App() {
   };
 
   const setItemSplitEvenly = (itemId: string) => {
-    const share = 1;
     setAlloc((prev) => ({
       ...prev,
-      [itemId]: Object.fromEntries(people.map((person) => [person.id, share])),
+      [itemId]: Object.fromEntries(people.map((person) => [person.id, 1])),
     }));
   };
 
@@ -477,26 +370,27 @@ function App() {
   };
 
   return (
-    <div className="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(94,234,212,0.22),_transparent_32%),linear-gradient(180deg,_#f8fffe_0%,_#eef6f4_45%,_#e7efec_100%)] text-slate-900">
+    <div className="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(94,234,212,0.18),_transparent_28%),linear-gradient(180deg,_#f8fffe_0%,_#eef6f4_45%,_#e7efec_100%)] text-slate-900">
       <div className="mx-auto flex max-w-5xl flex-col gap-4 px-4 pb-28 pt-5 sm:px-6 lg:px-8">
-        <header className="space-y-4">
-          <div className="rounded-[28px] border border-white/70 bg-white/80 p-5 shadow-[0_20px_60px_rgba(15,23,42,0.08)] backdrop-blur">
-            <div className="flex items-start justify-between gap-4">
-              <div className="space-y-2">
-                <p className="text-xs font-semibold uppercase tracking-[0.24em] text-teal-700">Split bills fast</p>
-                <h1 className="text-3xl font-semibold tracking-tight text-slate-950">Built for receipt-first bill splitting on mobile.</h1>
-                <p className="max-w-2xl text-sm leading-6 text-slate-600">
-                  Capture a receipt, clean the extraction, then assign items with large touch targets instead of fighting a spreadsheet.
-                </p>
+
+        {/* Header */}
+        <header>
+          <div className="rounded-[28px] border border-white/70 bg-white/80 p-5 shadow-[0_20px_60px_rgba(15,23,42,0.06)] backdrop-blur">
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <h1 className="text-2xl font-semibold tracking-tight text-slate-950 sm:text-3xl">Split</h1>
+                <p className="mt-1 text-sm text-slate-500">Snap a receipt, extract items with AI, split the bill.</p>
               </div>
-              <div className="hidden rounded-3xl bg-slate-950 px-4 py-3 text-right text-white sm:block">
-                <div className="text-xs uppercase tracking-[0.2em] text-teal-300">Current total</div>
-                <div className="mt-1 text-2xl font-semibold">{formatMoney(grandTotal || receiptTotal)}</div>
-                <div className="text-xs text-slate-300">{items.length} items · {people.length} people</div>
-              </div>
+              {step !== 1 && (
+                <div className="hidden rounded-3xl bg-slate-950 px-4 py-3 text-right text-white sm:block">
+                  <div className="text-xs uppercase tracking-[0.2em] text-teal-300">Total</div>
+                  <div className="mt-1 text-xl font-semibold">{formatMoney(grandTotal || receiptTotal, currency)}</div>
+                </div>
+              )}
             </div>
 
-            <div className="mt-5 grid gap-3 sm:grid-cols-3">
+            {/* Step indicators */}
+            <div className="mt-4 grid grid-cols-3 gap-2">
               {(Object.entries(stepMeta) as Array<[string, (typeof stepMeta)[Step]]>).map(([key, meta]) => {
                 const numericStep = Number(key) as Step;
                 const Icon = meta.icon;
@@ -507,25 +401,25 @@ function App() {
                     key={key}
                     type="button"
                     onClick={() => setStep(numericStep)}
-                    className={`rounded-2xl border p-4 text-left transition ${
+                    className={`rounded-2xl border p-3 text-left transition sm:p-4 ${
                       active
-                        ? 'border-teal-400 bg-teal-50 shadow-[0_10px_30px_rgba(20,184,166,0.16)]'
+                        ? 'border-teal-400 bg-teal-50 shadow-[0_8px_24px_rgba(20,184,166,0.14)]'
                         : complete
                           ? 'border-emerald-200 bg-emerald-50/80'
                           : 'border-slate-200 bg-white'
                     }`}
                   >
-                    <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-2 sm:gap-3">
                       <div
-                        className={`flex size-11 items-center justify-center rounded-2xl ${
-                          active ? 'bg-teal-600 text-white' : complete ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-500'
+                        className={`flex size-9 items-center justify-center rounded-xl sm:size-11 sm:rounded-2xl ${
+                          active ? 'bg-teal-600 text-white' : complete ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-400'
                         }`}
                       >
-                        <Icon className="size-5" />
+                        {complete ? <Check className="size-4 sm:size-5" /> : <Icon className="size-4 sm:size-5" />}
                       </div>
-                      <div>
-                        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">{meta.label}</p>
-                        <p className="text-base font-semibold text-slate-900">{meta.title}</p>
+                      <div className="min-w-0">
+                        <p className="truncate text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">{meta.label}</p>
+                        <p className="hidden truncate text-sm font-semibold text-slate-900 sm:block">{meta.title}</p>
                       </div>
                     </div>
                   </button>
@@ -535,182 +429,139 @@ function App() {
           </div>
         </header>
 
-        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+        {/* Content */}
+        <div className={`grid gap-4 ${step === 1 ? '' : 'lg:grid-cols-[minmax(0,1fr)_320px]'}`}>
           <main className="space-y-4">
             <Card className="overflow-hidden border-white/70 bg-white/85">
               <CardContent className="space-y-5 p-5">
-                <div className="flex items-center justify-between gap-4">
-                  <div>
-                    <p className="text-xs font-semibold uppercase tracking-[0.22em] text-teal-700">Step {step}</p>
-                    <h2 className="text-xl font-semibold text-slate-950">{currentStep.title}</h2>
-                  </div>
-                  <div className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600">
-                    {Math.round(completion * 100)}% allocated
-                  </div>
-                </div>
-
-                {step === 1 && (
-                  <div className="space-y-5">
-                    <div className="grid gap-3 sm:grid-cols-2">
-                      <label className="flex cursor-pointer items-center justify-between rounded-3xl border border-slate-200 bg-slate-50 px-4 py-4 text-left transition hover:border-teal-300 hover:bg-white">
-                        <div>
-                          <p className="text-sm font-semibold text-slate-900">Choose a receipt photo</p>
-                          <p className="text-xs text-slate-500">Camera capture is enabled for iPhone.</p>
-                        </div>
-                        <div className="flex size-11 items-center justify-center rounded-2xl bg-teal-600 text-white">
-                          <Camera className="size-5" />
-                        </div>
-                        <input
-                          type="file"
-                          accept="image/*"
-                          capture="environment"
-                          className="hidden"
-                          onChange={(e) => onFile(e.target.files?.[0])}
-                        />
-                      </label>
-
-                      <div className="rounded-3xl border border-slate-200 bg-slate-50 px-4 py-4">
-                        <p className="text-sm font-semibold text-slate-900">Receipt scan tips</p>
-                        <p className="mt-1 text-xs leading-5 text-slate-500">
-                          Keep the full paper inside frame, avoid shadows, and tap corners tightly before extracting text.
-                        </p>
-                      </div>
+                {step !== 1 && (
+                  <div className="flex items-center justify-between gap-4">
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-[0.22em] text-teal-700">Step {step}</p>
+                      <h2 className="text-xl font-semibold text-slate-950">{currentStep.title}</h2>
                     </div>
-
-                    {imageEl && (
-                      <div className="space-y-4">
-                        <div
-                          ref={overlayRef}
-                          className="relative isolate overflow-hidden rounded-[28px] border border-slate-200 bg-slate-950/5 touch-none"
-                          onPointerMove={(e) => {
-                            if (dragCornerRef.current === null) return;
-                            moveCornerFromPointer(dragCornerRef.current, e.clientX, e.clientY, dragOffsetRef.current);
-                          }}
-                          onPointerUp={(e) => {
-                            dragCornerRef.current = null;
-                            overlayRef.current?.releasePointerCapture(e.pointerId);
-                          }}
-                          onPointerCancel={() => {
-                            dragCornerRef.current = null;
-                          }}
-                        >
-                          <canvas ref={canvasRef} className="block w-full" />
-                          {corners.map((corner, index) => {
-                            const leftPct = (corner.x / imageEl.width) * 100;
-                            const topPct = (corner.y / imageEl.height) * 100;
-                            return (
-                              <button
-                                key={index}
-                                type="button"
-                                aria-label={`corner-${index + 1}`}
-                                className="absolute size-11 -translate-x-1/2 -translate-y-1/2 rounded-full border-4 border-white bg-teal-500 shadow-[0_10px_30px_rgba(13,148,136,0.35)]"
-                                style={{ left: `${leftPct}%`, top: `${topPct}%` }}
-                                onPointerDown={(e) => {
-                                  e.preventDefault();
-                                  if (!overlayRef.current) return;
-                                  const rect = overlayRef.current.getBoundingClientRect();
-                                  const cornerX = (corner.x / imageEl.width) * rect.width;
-                                  const cornerY = (corner.y / imageEl.height) * rect.height;
-                                  dragOffsetRef.current = {
-                                    x: e.clientX - rect.left - cornerX,
-                                    y: e.clientY - rect.top - cornerY,
-                                  };
-                                  dragCornerRef.current = index;
-                                  overlayRef.current.setPointerCapture(e.pointerId);
-                                }}
-                              />
-                            );
-                          })}
-                          <div className="absolute bottom-3 left-3 rounded-full bg-slate-950/70 px-3 py-1 text-xs text-white backdrop-blur">
-                            Drag all four corners to match the receipt edges.
-                          </div>
-                        </div>
-
-                        <div className="grid gap-3">
-                          <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
-                            <div className="mb-3 flex flex-wrap gap-2">
-                              <Button type="button" variant="outline" onClick={() => {
-                                setBrightness(102);
-                                setContrast(118);
-                                setSaturation(100);
-                              }}>
-                                Natural
-                              </Button>
-                              <Button type="button" variant="outline" onClick={() => {
-                                setBrightness(110);
-                                setContrast(145);
-                                setSaturation(40);
-                              }}>
-                                <ScanLine className="mr-2 size-4" /> High contrast
-                              </Button>
-                              <Button type="button" variant="outline" onClick={() => {
-                                setBrightness(118);
-                                setContrast(128);
-                                setSaturation(0);
-                              }}>
-                                <WandSparkles className="mr-2 size-4" /> Faded paper
-                              </Button>
-                            </div>
-                            <div className="grid gap-3 sm:grid-cols-3">
-                              {[
-                                { label: 'Brightness', value: brightness, setValue: setBrightness },
-                                { label: 'Contrast', value: contrast, setValue: setContrast },
-                                { label: 'Saturation', value: saturation, setValue: setSaturation },
-                              ].map(({ label, value, setValue }) => (
-                                <label key={label} className="text-sm font-medium text-slate-700">
-                                  <div className="mb-2 flex items-center justify-between">
-                                    <span>{label}</span>
-                                    <span className="text-xs text-slate-500">{value}%</span>
-                                  </div>
-                                  <input
-                                    className="h-2 w-full cursor-pointer appearance-none rounded-full bg-slate-200"
-                                    type="range"
-                                    min={50}
-                                    max={200}
-                                    value={value}
-                                    onChange={(e) => setValue(Number(e.target.value))}
-                                  />
-                                </label>
-                              ))}
-                            </div>
-                          </div>
-
-                          <div className="flex flex-col gap-2 sm:flex-row">
-                            <Button type="button" className="h-12 flex-1 rounded-2xl" onClick={flattenAndEnhance}>
-                              <Sparkles className="mr-2 size-4" /> Flatten and enhance
-                            </Button>
-                            <Button
-                              type="button"
-                              className="h-12 flex-1 rounded-2xl"
-                              onClick={runOcr}
-                              disabled={!processedDataUrl || ocrLoading}
-                            >
-                              {ocrLoading ? <Loader2 className="mr-2 size-4 animate-spin" /> : <ReceiptText className="mr-2 size-4" />}
-                              Extract text
-                            </Button>
-                          </div>
-
-                          {ocrError && <p className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{ocrError}</p>}
-
-                          {processedDataUrl && (
-                            <div className="space-y-2">
-                              <div className="flex items-center justify-between">
-                                <p className="text-sm font-semibold text-slate-900">Processed preview</p>
-                                <p className="text-xs text-slate-500">This version is used for OCR.</p>
-                              </div>
-                              <img
-                                src={processedDataUrl}
-                                className="max-h-[28rem] w-full rounded-[24px] border border-slate-200 bg-white object-contain"
-                                alt="Processed receipt"
-                              />
-                            </div>
-                          )}
-                        </div>
+                    {step === 3 && (
+                      <div className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600">
+                        {Math.round(completion * 100)}% allocated
                       </div>
                     )}
                   </div>
                 )}
 
+                {/* Step 1: Capture */}
+                {step === 1 && (
+                  <div className="space-y-5">
+                    {!imageEl ? (
+                      <label className="flex cursor-pointer flex-col items-center gap-4 rounded-3xl border-2 border-dashed border-slate-200 bg-slate-50/50 p-10 text-center transition hover:border-teal-300 hover:bg-white">
+                        <div className="flex size-16 items-center justify-center rounded-3xl bg-teal-600 text-white shadow-[0_12px_36px_rgba(13,148,136,0.25)]">
+                          <Camera className="size-7" />
+                        </div>
+                        <div>
+                          <p className="text-base font-semibold text-slate-900">Take a photo or upload a receipt</p>
+                          <p className="mt-1 text-sm text-slate-500">JPEG, PNG, HEIC supported</p>
+                        </div>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          className="hidden"
+                          onChange={(e) => {
+                            onFile(e.target.files?.[0]);
+                            e.target.value = '';
+                          }}
+                        />
+                      </label>
+                    ) : (
+                      <div className="space-y-4">
+                        {/* Image crop area */}
+                        <div className="p-6">
+                          <div
+                            ref={overlayRef}
+                            className="relative isolate overflow-visible rounded-[20px] border border-slate-200 bg-slate-950/5 touch-none"
+                            onPointerMove={(e) => {
+                              if (dragCornerRef.current === null) return;
+                              moveCornerFromPointer(dragCornerRef.current, e.clientX, e.clientY, dragOffsetRef.current);
+                            }}
+                            onPointerUp={(e) => {
+                              dragCornerRef.current = null;
+                              overlayRef.current?.releasePointerCapture(e.pointerId);
+                            }}
+                            onPointerCancel={() => {
+                              dragCornerRef.current = null;
+                            }}
+                          >
+                            <canvas ref={canvasRef} className="block w-full rounded-[20px]" />
+                            {corners.map((corner, index) => {
+                              const leftPct = (corner.x / imageEl.width) * 100;
+                              const topPct = (corner.y / imageEl.height) * 100;
+                              return (
+                                <button
+                                  key={index}
+                                  type="button"
+                                  aria-label={`corner-${index + 1}`}
+                                  className="absolute z-10 size-10 -translate-x-1/2 -translate-y-1/2 rounded-full border-[3px] border-white bg-teal-500 shadow-[0_8px_24px_rgba(13,148,136,0.3)] transition-transform active:scale-110"
+                                  style={{ left: `${leftPct}%`, top: `${topPct}%` }}
+                                  onPointerDown={(e) => {
+                                    e.preventDefault();
+                                    if (!overlayRef.current) return;
+                                    const rect = overlayRef.current.getBoundingClientRect();
+                                    const cornerX = (corner.x / imageEl.width) * rect.width;
+                                    const cornerY = (corner.y / imageEl.height) * rect.height;
+                                    dragOffsetRef.current = {
+                                      x: e.clientX - rect.left - cornerX,
+                                      y: e.clientY - rect.top - cornerY,
+                                    };
+                                    dragCornerRef.current = index;
+                                    overlayRef.current.setPointerCapture(e.pointerId);
+                                  }}
+                                />
+                              );
+                            })}
+                          </div>
+                        </div>
+
+                        {/* Action buttons */}
+                        <div className="flex flex-col gap-2 sm:flex-row">
+                          <label className="flex h-12 flex-1 cursor-pointer items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-white text-sm font-semibold text-slate-800 transition hover:border-teal-300 hover:bg-teal-50/60">
+                            <Camera className="size-4" /> Change photo
+                            <input
+                              type="file"
+                              accept="image/*"
+                              className="hidden"
+                              onChange={(e) => {
+                                onFile(e.target.files?.[0]);
+                                e.target.value = '';
+                              }}
+                            />
+                          </label>
+                          <Button
+                            type="button"
+                            className="h-12 flex-1 rounded-2xl text-base"
+                            onClick={extractItems}
+                            disabled={extracting}
+                          >
+                            {extracting ? (
+                              <>
+                                <Loader2 className="mr-2 size-5 animate-spin" /> Extracting...
+                              </>
+                            ) : (
+                              <>
+                                <Sparkles className="mr-2 size-5" /> Extract items
+                              </>
+                            )}
+                          </Button>
+                        </div>
+
+                        {extractError && (
+                          <p className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+                            {extractError}
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Step 2: Review */}
                 {step === 2 && (
                   <div className="space-y-4">
                     <div className="grid gap-3 sm:grid-cols-3">
@@ -720,17 +571,17 @@ function App() {
                       </div>
                       <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
                         <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Subtotal</p>
-                        <p className="mt-2 text-2xl font-semibold text-slate-950">{formatMoney(subtotal)}</p>
+                        <p className="mt-2 text-2xl font-semibold text-slate-950">{formatMoney(subtotal, currency)}</p>
                       </div>
                       <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
-                        <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Detected total</p>
-                        <p className="mt-2 text-2xl font-semibold text-slate-950">{formatMoney(receiptTotal)}</p>
+                        <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Receipt total</p>
+                        <p className="mt-2 text-2xl font-semibold text-slate-950">{formatMoney(receiptTotal, currency)}</p>
                       </div>
                     </div>
 
                     <div className="space-y-3">
                       {items.map((item, index) => (
-                        <div key={item.id} className="rounded-[26px] border border-slate-200 bg-slate-50/80 p-4">
+                        <div key={item.id} className="rounded-[22px] border border-slate-200 bg-slate-50/80 p-4">
                           <div className="mb-3 flex items-center justify-between">
                             <p className="text-sm font-semibold text-slate-900">Item {index + 1}</p>
                             <button
@@ -741,14 +592,15 @@ function App() {
                               <X className="size-4" />
                             </button>
                           </div>
-                          <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_110px_120px]">
-                            <Input value={item.name} onChange={(e) => updateItem(item.id, { name: e.target.value })} />
+                          <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_100px_110px]">
+                            <Input value={item.name} onChange={(e) => updateItem(item.id, { name: e.target.value })} placeholder="Name" />
                             <Input
                               type="number"
                               step="0.1"
                               min="0"
                               value={item.quantity}
                               onChange={(e) => updateItem(item.id, { quantity: Number(e.target.value || 0) })}
+                              placeholder="Qty"
                             />
                             <Input
                               type="number"
@@ -756,9 +608,12 @@ function App() {
                               min="0"
                               value={item.price}
                               onChange={(e) => updateItem(item.id, { price: Number(e.target.value || 0) })}
+                              placeholder="Price"
                             />
                           </div>
-                          <p className="mt-3 text-sm text-slate-500">Line total: {formatMoney(item.quantity * item.price)}</p>
+                          <p className="mt-2 text-sm text-slate-500">
+                            Line total: {formatMoney(item.quantity * item.price, currency)}
+                          </p>
                         </div>
                       ))}
                     </div>
@@ -772,27 +627,21 @@ function App() {
                       >
                         <Plus className="mr-2 size-4" /> Add item
                       </Button>
-                      <Button type="button" variant="outline" className="h-12 rounded-2xl" onClick={() => setStep(3)}>
+                      <Button type="button" className="h-12 rounded-2xl" onClick={() => setStep(3)}>
                         Continue to split <ChevronRight className="ml-2 size-4" />
                       </Button>
                     </div>
-
-                    {ocrText && (
-                      <details className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
-                        <summary className="cursor-pointer text-sm font-semibold text-slate-900">View raw OCR text</summary>
-                        <pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap text-xs leading-5 text-slate-600">{ocrText}</pre>
-                      </details>
-                    )}
                   </div>
                 )}
 
+                {/* Step 3: Split */}
                 {step === 3 && (
                   <div className="space-y-5">
                     <div className="grid gap-4 lg:grid-cols-[minmax(0,280px)_minmax(0,1fr)]">
-                      <div className="space-y-4 rounded-[28px] border border-slate-200 bg-slate-50 p-4">
+                      <div className="space-y-4 rounded-[24px] border border-slate-200 bg-slate-50 p-4">
                         <div>
                           <p className="text-sm font-semibold text-slate-900">People</p>
-                          <p className="text-xs leading-5 text-slate-500">Rename diners and add more if needed.</p>
+                          <p className="text-xs leading-5 text-slate-500">Rename or add diners.</p>
                         </div>
                         <div className="space-y-2">
                           {people.map((person) => (
@@ -807,18 +656,18 @@ function App() {
                             />
                           ))}
                         </div>
-                        <Button type="button" variant="outline" className="h-11 rounded-2xl" onClick={() => updatePeopleCount(people.length + 1)}>
+                        <Button type="button" variant="outline" className="h-11 w-full rounded-2xl" onClick={() => updatePeopleCount(people.length + 1)}>
                           <Plus className="mr-2 size-4" /> Add person
                         </Button>
 
-                        <div className="rounded-3xl bg-white p-4">
+                        <div className="rounded-2xl bg-white p-4">
                           <p className="text-sm font-semibold text-slate-900">Tip</p>
                           <div className="mt-3 flex items-center gap-2">
                             <Button type="button" variant={tipMode === 'percent' ? 'default' : 'outline'} onClick={() => setTipMode('percent')}>
                               %
                             </Button>
                             <Button type="button" variant={tipMode === 'fixed' ? 'default' : 'outline'} onClick={() => setTipMode('fixed')}>
-                              €
+                              {currency}
                             </Button>
                             <Input
                               className="max-w-[8rem]"
@@ -829,7 +678,9 @@ function App() {
                               onChange={(e) => setTipValue(Number(e.target.value || 0))}
                             />
                           </div>
-                          <p className="mt-3 text-sm text-slate-500">Tip amount: {formatMoney(tipAmount)}</p>
+                          <p className="mt-2 text-sm text-slate-500">
+                            Tip: {formatMoney(tipAmount, currency)}
+                          </p>
                         </div>
                       </div>
 
@@ -844,24 +695,24 @@ function App() {
                           const itemAlloc = alloc[item.id] || {};
                           const assignedTotal = people.reduce((sum, person) => sum + (itemAlloc[person.id] || 0), 0);
                           return (
-                            <div key={item.id} className="rounded-[28px] border border-slate-200 bg-slate-50/90 p-4">
+                            <div key={item.id} className="rounded-[24px] border border-slate-200 bg-slate-50/90 p-4">
                               <div className="flex flex-wrap items-start justify-between gap-3">
                                 <div>
                                   <p className="text-base font-semibold text-slate-950">{item.name}</p>
                                   <p className="text-sm text-slate-500">
-                                    {item.quantity} × {formatMoney(item.price)} = {formatMoney(item.quantity * item.price)}
+                                    {item.quantity} × {formatMoney(item.price, currency)} = {formatMoney(item.quantity * item.price, currency)}
                                   </p>
                                 </div>
-                                <div className="flex flex-wrap gap-2">
-                                  <Button type="button" variant="outline" className="rounded-2xl" onClick={() => setItemSplitEvenly(item.id)}>
-                                    Even split
+                                <div className="flex flex-wrap gap-1.5">
+                                  <Button type="button" variant="outline" className="h-8 rounded-xl px-3 text-xs" onClick={() => setItemSplitEvenly(item.id)}>
+                                    Even
                                   </Button>
-                                  {people.slice(0, 3).map((person) => (
+                                  {people.map((person) => (
                                     <Button
                                       key={person.id}
                                       type="button"
                                       variant="outline"
-                                      className="rounded-2xl"
+                                      className="h-8 rounded-xl px-3 text-xs"
                                       onClick={() => assignItemToPerson(item.id, person.id)}
                                     >
                                       {person.name}
@@ -870,15 +721,16 @@ function App() {
                                 </div>
                               </div>
 
-                              <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                              <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
                                 {people.map((person) => (
-                                  <label key={person.id} className="rounded-3xl border border-white bg-white p-3">
-                                    <div className="mb-2 text-sm font-medium text-slate-700">{person.name}</div>
+                                  <label key={person.id} className="rounded-2xl border border-white bg-white p-3">
+                                    <div className="mb-1 text-xs font-medium text-slate-600">{person.name}</div>
                                     <Input
                                       type="number"
                                       step="0.1"
                                       min="0"
                                       value={itemAlloc[person.id] ?? 0}
+                                      className="h-10"
                                       onChange={(e) =>
                                         setAlloc((prev) => ({
                                           ...prev,
@@ -893,10 +745,10 @@ function App() {
                                 ))}
                               </div>
 
-                              <p className="mt-3 text-sm text-slate-500">
+                              <p className="mt-2 text-xs text-slate-500">
                                 {assignedTotal > 0
-                                  ? `Assigned in ${assignedTotal.toFixed(1)} share${assignedTotal === 1 ? '' : 's'}.`
-                                  : 'No one has been assigned to this item yet.'}
+                                  ? `${assignedTotal.toFixed(1)} share${assignedTotal === 1 ? '' : 's'}`
+                                  : 'Not assigned'}
                               </p>
                             </div>
                           );
@@ -909,78 +761,86 @@ function App() {
             </Card>
           </main>
 
-          <aside className="space-y-4">
-            <Card className="border-slate-900 bg-slate-950 text-white">
-              <CardContent className="space-y-4 p-5">
-                <div>
-                  <p className="text-xs uppercase tracking-[0.22em] text-teal-300">Summary</p>
-                  <h3 className="mt-2 text-xl font-semibold">Who owes what</h3>
-                </div>
-                <div className="grid gap-3">
-                  {people.map((person) => (
-                    <div key={person.id} className="rounded-3xl bg-white/8 p-4">
-                      <div className="text-sm text-slate-300">{person.name}</div>
-                      <div className="mt-1 text-2xl font-semibold">{formatMoney(personTotals[person.id] || 0)}</div>
+          {/* Sidebar */}
+          {step !== 1 && (
+            <aside className="space-y-4">
+              <Card className="border-slate-900 bg-slate-950 text-white">
+                <CardContent className="space-y-4 p-5">
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.22em] text-teal-300">Summary</p>
+                    <h3 className="mt-1 text-lg font-semibold">Who owes what</h3>
+                  </div>
+                  <div className="grid gap-2">
+                    {people.map((person) => (
+                      <div key={person.id} className="rounded-2xl bg-white/8 p-4">
+                        <div className="text-sm text-slate-300">{person.name}</div>
+                        <div className="mt-1 text-2xl font-semibold">{formatMoney(personTotals[person.id] || 0, currency)}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-sm text-slate-300">
+                    <div className="flex items-center justify-between">
+                      <span>Subtotal</span>
+                      <span>{formatMoney(subtotal, currency)}</span>
                     </div>
-                  ))}
-                </div>
-                <div className="rounded-3xl border border-white/10 bg-white/5 p-4 text-sm text-slate-300">
-                  <div className="flex items-center justify-between">
-                    <span>Subtotal</span>
-                    <span>{formatMoney(subtotal)}</span>
+                    <div className="mt-2 flex items-center justify-between">
+                      <span>Tip</span>
+                      <span>{formatMoney(tipAmount, currency)}</span>
+                    </div>
+                    <div className="mt-2 flex items-center justify-between font-semibold text-white">
+                      <span>Total</span>
+                      <span>{formatMoney(grandTotal, currency)}</span>
+                    </div>
                   </div>
-                  <div className="mt-2 flex items-center justify-between">
-                    <span>Tip</span>
-                    <span>{formatMoney(tipAmount)}</span>
-                  </div>
-                  <div className="mt-2 flex items-center justify-between text-white">
-                    <span>Total</span>
-                    <span>{formatMoney(grandTotal)}</span>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
+                </CardContent>
+              </Card>
 
-            <Card className="border-white/70 bg-white/80">
-              <CardContent className="space-y-3 p-5">
-                <div className="flex items-center justify-between text-sm text-slate-600">
-                  <span>Allocation progress</span>
-                  <span>{Math.round(completion * 100)}%</span>
-                </div>
-                <div className="h-3 rounded-full bg-slate-200">
-                  <div className="h-3 rounded-full bg-teal-500 transition-all" style={{ width: `${completion * 100}%` }} />
-                </div>
-                <p className="text-sm text-slate-500">
-                  Assigned value: {formatMoney(splitAssignedValue)} of {formatMoney(subtotal)}
-                </p>
-              </CardContent>
-            </Card>
-          </aside>
+              {step === 3 && (
+                <Card className="border-white/70 bg-white/80">
+                  <CardContent className="space-y-3 p-5">
+                    <div className="flex items-center justify-between text-sm text-slate-600">
+                      <span>Allocation</span>
+                      <span className="font-semibold">{Math.round(completion * 100)}%</span>
+                    </div>
+                    <div className="h-2.5 rounded-full bg-slate-200">
+                      <div className="h-2.5 rounded-full bg-teal-500 transition-all" style={{ width: `${completion * 100}%` }} />
+                    </div>
+                    <p className="text-xs text-slate-500">
+                      {formatMoney(splitAssignedValue, currency)} of {formatMoney(subtotal, currency)} assigned
+                    </p>
+                  </CardContent>
+                </Card>
+              )}
+            </aside>
+          )}
         </div>
       </div>
 
-      <div className="fixed inset-x-0 bottom-0 z-20 border-t border-slate-200 bg-white/90 px-4 py-3 backdrop-blur">
+      {/* Bottom bar */}
+      <div className="fixed inset-x-0 bottom-0 z-20 border-t border-slate-200 bg-white/90 px-4 py-3 backdrop-blur-lg">
         <div className="mx-auto flex max-w-5xl items-center justify-between gap-3">
           <Button
             type="button"
             variant="outline"
-            className="h-12 min-w-[7.5rem] rounded-2xl"
+            className="h-11 min-w-[6rem] rounded-2xl sm:h-12 sm:min-w-[7.5rem]"
             disabled={step === 1}
             onClick={() => setStep((current) => Math.max(1, current - 1) as Step)}
           >
-            <ChevronLeft className="mr-2 size-4" /> Back
+            <ChevronLeft className="mr-1 size-4" /> Back
           </Button>
-          <div className="text-right">
-            <p className="text-xs uppercase tracking-[0.18em] text-slate-500">{currentStep.label}</p>
-            <p className="text-sm font-semibold text-slate-900">{currentStep.title}</p>
-          </div>
+          {step !== 1 && (
+            <div className="text-center">
+              <p className="text-xs uppercase tracking-[0.16em] text-slate-400">{currentStep.label}</p>
+              <p className="text-sm font-semibold text-slate-900">{currentStep.title}</p>
+            </div>
+          )}
           <Button
             type="button"
-            className="h-12 min-w-[7.5rem] rounded-2xl"
-            disabled={(step === 1 && !processedDataUrl) || (step === 2 && items.length === 0) || step === 3}
+            className="h-11 min-w-[6rem] rounded-2xl sm:h-12 sm:min-w-[7.5rem]"
+            disabled={(step === 1) || (step === 2 && items.length === 0) || step === 3}
             onClick={() => setStep((current) => Math.min(3, current + 1) as Step)}
           >
-            Next <ChevronRight className="ml-2 size-4" />
+            Next <ChevronRight className="ml-1 size-4" />
           </Button>
         </div>
       </div>
