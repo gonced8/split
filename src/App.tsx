@@ -218,15 +218,17 @@ function App() {
   }, [imageEl, corners, brightness, contrast, saturation]);
 
   const moveCornerFromPointer = (cornerIndex: number, clientX: number, clientY: number, offset = { x: 0, y: 0 }) => {
-    if (!imageEl || !overlayRef.current || !canvasRef.current) return;
+    if (!imageEl || !overlayRef.current) return;
     const rect = overlayRef.current.getBoundingClientRect();
-    const xOnCanvas = clamp(clientX - rect.left - offset.x, 0, rect.width);
-    const yOnCanvas = clamp(clientY - rect.top - offset.y, 0, rect.height);
 
-    const xScale = imageEl.width / canvasRef.current.width;
-    const yScale = imageEl.height / canvasRef.current.height;
-    const x = xOnCanvas * xScale;
-    const y = yOnCanvas * yScale;
+    // Keep all drag math in CSS/display pixels to avoid drift,
+    // then convert once back to image coordinates.
+    const xDisplay = clamp(clientX - rect.left - offset.x, 0, rect.width);
+    const yDisplay = clamp(clientY - rect.top - offset.y, 0, rect.height);
+
+    const x = (xDisplay / rect.width) * imageEl.width;
+    const y = (yDisplay / rect.height) * imageEl.height;
+
     setCorners((prev) => prev.map((c, i) => (i === cornerIndex ? { x, y } : c)));
   };
 
