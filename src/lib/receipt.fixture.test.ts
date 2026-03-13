@@ -9,7 +9,8 @@ describe('receipt OCR fixture', () => {
     'extracts line items and total from sample receipt image',
     async () => {
       const fixturePath = path.resolve(process.cwd(), 'tests/fixtures/receipt-sample.jpg');
-      const result = await Tesseract.recognize(fixturePath, 'eng');
+      const langPath = path.resolve(process.cwd(), 'node_modules/@tesseract.js-data/eng/4.0.0_best_int');
+      const result = await Tesseract.recognize(fixturePath, 'eng', { langPath });
       const parsed = parseReceipt(result.data.text);
 
       const names = parsed.items.map((i) => i.name.toLowerCase());

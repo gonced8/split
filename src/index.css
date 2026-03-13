@@ -1,8 +1,55 @@
+@import url('https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  color-scheme: light;
+}
+
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+html {
+  background: #eef6f4;
+}
+
 body {
-  @apply bg-slate-100 text-slate-900;
-  font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  @apply text-slate-900;
+  margin: 0;
+  min-width: 320px;
+  font-family: 'Instrument Sans', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  text-rendering: optimizeLegibility;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 9999px;
+  background: #0f766e;
+  box-shadow: 0 4px 14px rgba(15, 118, 110, 0.28);
+}
+
+input[type='range']::-moz-range-thumb {
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 9999px;
+  background: #0f766e;
+  box-shadow: 0 4px 14px rgba(15, 118, 110, 0.28);
+}
+
+::selection {
+  background: rgba(20, 184, 166, 0.22);
 }

@@ -42,4 +42,32 @@ describe('parseReceipt', () => {
     expect(out.items.map((i) => i.price)).toEqual([14.98, 12.5, 1.99]);
     expect(out.total).toBeCloseTo(31.39, 2);
   });
+
+  it('stitches OCR lines where the amount was split onto the next line', () => {
+    const input = `
+      SPICY TUNA ROLL
+      8.50
+      MISO SOUP
+      2.00
+      TOTAL 10.50
+    `;
+    const out = parseReceipt(input);
+    expect(out.items.map((i) => i.name)).toEqual(['SPICY TUNA ROLL', 'MISO SOUP']);
+    expect(out.items.map((i) => i.price)).toEqual([8.5, 2]);
+    expect(out.total).toBeCloseTo(10.5, 2);
+  });
+
+  it('converts quantity rows with line totals into per-unit prices', () => {
+    const input = `
+      2 x Soda 6,00
+      3 x Taco 13,50
+      TOTAL 19,50
+    `;
+    const out = parseReceipt(input);
+    expect(out.items).toMatchObject([
+      { name: 'Soda', quantity: 2, price: 3 },
+      { name: 'Taco', quantity: 3, price: 4.5 },
+    ]);
+    expect(out.total).toBeCloseTo(19.5, 2);
+  });
 });
