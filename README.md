@@ -8,7 +8,7 @@ Receipt splitting web app (React + TypeScript + Vite + Tailwind + shadcn-style U
 - Interactive corner dragging to crop the receipt area
 - Perspective flattening (homography warp) to "scan" the receipt
 - Image adjustments: brightness, contrast, saturation
-- OCR extraction with `tesseract.js`
+- OCR extraction with `tesseract.js` + preprocessing (upscale + binarization) for better mobile receipts
 - Parsed editable receipt items (name, quantity, price)
 - People list with default names + rename + add person
 - Allocation table with **float quantities per person per item**
@@ -35,6 +35,13 @@ npm run dev
 npm run build
 npm run preview
 ```
+
+## CI
+
+- Pull request workflow (`.github/workflows/ci.yml`) runs:
+  - `npm ci`
+  - `npm run lint`
+  - `npm run build`
 
 ## Deploy (GitHub Pages)
 

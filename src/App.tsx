@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Camera, Loader2, Plus, Sparkles } from 'lucide-react';
 import Tesseract from 'tesseract.js';
 import { Button } from './components/ui/button';
@@ -18,27 +18,52 @@ function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
 }
 
+function parsePrice(raw: string) {
+  const normalized = raw.replace(/\s/g, '').replace(',', '.');
+  const value = Number(normalized);
+  return Number.isFinite(value) ? value : NaN;
+}
+
 function parseReceipt(text: string): { items: ReceiptItem[]; total: number } {
-  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+  const lines = text
+    .split('\n')
+    .map((l) => l.replace(/[|]/g, ' ').replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+
   const items: ReceiptItem[] = [];
   let total = 0;
 
   for (const line of lines) {
-    const totalMatch = line.match(/(total|tot|amount due)\s*[: ]\s*([0-9]+[.,][0-9]{2})/i);
-    if (totalMatch) total = Number(totalMatch[2].replace(',', '.'));
+    const totalMatch = line.match(/(?:^|\s)(total|tot(?:al)?\.?|amount due|montante|a pagar)\s*[:€ ]*([0-9]+[.,][0-9]{2})/i);
+    if (totalMatch) {
+      const maybeTotal = parsePrice(totalMatch[2]);
+      if (!Number.isNaN(maybeTotal)) total = Math.max(total, maybeTotal);
+    }
+
+    const qtyLine = line.match(/^([0-9]+(?:[.,][0-9]+)?)\s*[x×]\s+(.+?)\s+([0-9]+[.,][0-9]{2})$/i);
+    if (qtyLine) {
+      const quantity = parsePrice(qtyLine[1]);
+      const name = qtyLine[2].trim();
+      const price = parsePrice(qtyLine[3]);
+      if (name && !Number.isNaN(quantity) && !Number.isNaN(price)) {
+        items.push({ id: uid('item'), name, price, quantity });
+      }
+      continue;
+    }
 
     const itemMatch = line.match(/^(.+?)\s+([0-9]+[.,][0-9]{2})$/);
     if (!itemMatch) continue;
 
-    const name = itemMatch[1].replace(/\s{2,}/g, ' ');
-    const price = Number(itemMatch[2].replace(',', '.'));
+    const name = itemMatch[1].replace(/\s{2,}/g, ' ').trim();
+    const price = parsePrice(itemMatch[2]);
     if (!name || Number.isNaN(price)) continue;
+    if (/(total|subtotal|troco|change|iva|vat)/i.test(name)) continue;
 
     items.push({ id: uid('item'), name, price, quantity: 1 });
   }
 
   if (!total) total = items.reduce((s, i) => s + i.price * i.quantity, 0);
-  return { items: items.slice(0, 40), total };
+  return { items: items.slice(0, 60), total };
 }
 
 function solveLinear(A: number[][], b: number[]) {
@@ -134,6 +159,48 @@ function bilinearSample(data: Uint8ClampedArray, w: number, h: number, x: number
   return out;
 }
 
+function preprocessForOcr(inputDataUrl: string) {
+  return new Promise<string>((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.max(1.5, 1600 / Math.max(img.width, 1));
+      const w = Math.round(img.width * scale);
+      const h = Math.round(img.height * scale);
+
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return reject(new Error('No canvas context'));
+
+      ctx.drawImage(img, 0, 0, w, h);
+      const imageData = ctx.getImageData(0, 0, w, h);
+      const d = imageData.data;
+
+      let sum = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        const gray = 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
+        sum += gray;
+      }
+      const mean = sum / (d.length / 4);
+      const threshold = mean * 0.93;
+
+      for (let i = 0; i < d.length; i += 4) {
+        const gray = 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
+        const bw = gray > threshold ? 255 : 0;
+        d[i] = bw;
+        d[i + 1] = bw;
+        d[i + 2] = bw;
+      }
+
+      ctx.putImageData(imageData, 0, 0);
+      resolve(canvas.toDataURL('image/png'));
+    };
+    img.onerror = () => reject(new Error('Failed to load image for OCR preprocess'));
+    img.src = inputDataUrl;
+  });
+}
+
 function App() {
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [imageEl, setImageEl] = useState<HTMLImageElement | null>(null);
@@ -196,7 +263,7 @@ function App() {
     img.src = url;
   };
 
-  const redrawPreview = () => {
+  useEffect(() => {
     if (!imageEl || !previewRef.current) return;
     const canvas = previewRef.current;
     const maxW = 900;
@@ -226,9 +293,7 @@ function App() {
       ctx.fill();
       ctx.stroke();
     });
-  };
-
-  useMemo(redrawPreview, [imageEl, corners, brightness, contrast, saturation]);
+  }, [imageEl, corners, brightness, contrast, saturation]);
 
   const flattenAndEnhance = () => {
     if (!imageEl || corners.length !== 4) return;
@@ -295,9 +360,14 @@ function App() {
     if (!processedDataUrl) return;
     setOcrLoading(true);
     try {
-      const result = await Tesseract.recognize(processedDataUrl, 'eng');
+      const prepared = await preprocessForOcr(processedDataUrl);
+      const result = await Tesseract.recognize(prepared, 'eng');
       const parsed = parseReceipt(result.data.text);
-      setItems(parsed.items.length ? parsed.items : [{ id: uid('item'), name: 'Manual item', price: parsed.total || 0, quantity: 1 }]);
+      setItems(
+        parsed.items.length
+          ? parsed.items
+          : [{ id: uid('item'), name: 'Manual item', price: parsed.total || 0, quantity: 1 }],
+      );
     } finally {
       setOcrLoading(false);
     }
@@ -308,13 +378,13 @@ function App() {
   return (
     <div className="mx-auto max-w-6xl p-4 md:p-8 space-y-4">
       <h1 className="text-2xl font-bold">Split 🍕</h1>
-      <p className="text-sm text-slate-600">Receipt scanner + smart split MVP</p>
+      <p className="text-sm text-slate-600">Receipt scanner + smart split MVP (mobile-first)</p>
 
       <Card><CardContent className="space-y-3">
         <div className="flex items-center gap-3">
           <label className="inline-flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 text-sm">
             <Camera className="size-4" /> Upload receipt photo
-            <input type="file" accept="image/*" className="hidden" onChange={(e) => onFile(e.target.files?.[0])} />
+            <input type="file" accept="image/*" capture="environment" className="hidden" onChange={(e) => onFile(e.target.files?.[0])} />
           </label>
           <Button onClick={flattenAndEnhance} disabled={!imageEl}>Flatten image</Button>
           <Button onClick={runOcr} disabled={!processedDataUrl || ocrLoading}>{ocrLoading ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />} Extract text</Button>
@@ -322,17 +392,20 @@ function App() {
 
         {imageUrl && <canvas
           ref={previewRef}
-          className="w-full rounded border bg-white"
-          onMouseDown={(e) => {
+          className="w-full rounded border bg-white touch-none"
+          onPointerDown={(e) => {
             if (!imageEl || !previewRef.current) return;
             const rect = previewRef.current.getBoundingClientRect();
             const scale = imageEl.width / previewRef.current.width;
             const x = (e.clientX - rect.left) * scale;
             const y = (e.clientY - rect.top) * scale;
-            const nearest = corners.findIndex((c) => Math.hypot(c.x - x, c.y - y) < 35 * scale);
-            if (nearest >= 0) setActiveCorner(nearest);
+            const nearest = corners.findIndex((c) => Math.hypot(c.x - x, c.y - y) < 45 * scale);
+            if (nearest >= 0) {
+              setActiveCorner(nearest);
+              previewRef.current.setPointerCapture(e.pointerId);
+            }
           }}
-          onMouseMove={(e) => {
+          onPointerMove={(e) => {
             if (activeCorner === null || !imageEl || !previewRef.current) return;
             const rect = previewRef.current.getBoundingClientRect();
             const scale = imageEl.width / previewRef.current.width;
@@ -340,8 +413,9 @@ function App() {
             const y = clamp((e.clientY - rect.top) * scale, 0, imageEl.height);
             setCorners((prev) => prev.map((c, i) => (i === activeCorner ? { x, y } : c)));
           }}
-          onMouseUp={() => setActiveCorner(null)}
-          onMouseLeave={() => setActiveCorner(null)}
+          onPointerUp={() => setActiveCorner(null)}
+          onPointerCancel={() => setActiveCorner(null)}
+          onPointerLeave={() => setActiveCorner(null)}
         />}
 
         <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
