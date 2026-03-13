@@ -18,7 +18,7 @@ import { Card, CardContent } from './components/ui/card';
 import { Input } from './components/ui/input';
 import { type ReceiptItem, uid } from './lib/receipt';
 import { computeSplitTotals, type Person } from './lib/split';
-import { parseReceiptWithGemini } from './lib/gemini';
+import { getGeminiMode, parseReceiptWithGemini } from './lib/gemini';
 
 type Corner = { x: number; y: number };
 type Step = 1 | 2 | 3;
@@ -406,7 +406,15 @@ function App() {
             <div className="flex items-center justify-between gap-4">
               <div>
                 <h1 className="text-2xl font-semibold tracking-tight text-slate-950 sm:text-3xl">Split</h1>
-                <p className="mt-1 text-sm text-slate-500">Snap a receipt, extract items with AI, split the bill.</p>
+                <p className="mt-1 flex flex-wrap items-center gap-2 text-sm text-slate-500">
+                  Snap a receipt, extract items with AI, split the bill.
+                  <span
+                    className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-600"
+                    title={getGeminiMode() === 'direct' ? 'Using your API key (VITE_GEMINI_API_KEY)' : 'Using Worker proxy (VITE_PROXY_URL)'}
+                  >
+                    API: {getGeminiMode() === 'direct' ? 'Direct' : 'Proxy'}
+                  </span>
+                </p>
               </div>
               {step !== 1 && (
                 <div className="hidden rounded-3xl bg-slate-950 px-4 py-3 text-right text-white sm:block">
@@ -689,7 +697,6 @@ function App() {
                               <th className="w-10 px-4 py-3 text-xs font-semibold uppercase tracking-wider text-slate-500">#</th>
                               <th className="px-4 py-3 text-xs font-semibold uppercase tracking-wider text-slate-500">Product</th>
                               <th className="w-24 px-4 py-3 text-xs font-semibold uppercase tracking-wider text-slate-500">Qty</th>
-                              <th className="w-28 px-4 py-3 text-xs font-semibold uppercase tracking-wider text-slate-500">Unit price</th>
                               <th className="w-28 px-4 py-3 text-right text-xs font-semibold uppercase tracking-wider text-slate-500">Line total</th>
                               <th className="w-12 px-2 py-3" aria-label="Remove" />
                             </tr>
@@ -719,18 +726,19 @@ function App() {
                                     className="h-10 border-slate-200 bg-white text-slate-900"
                                   />
                                 </td>
-                                <td className="px-4 py-2">
+                                <td className="px-4 py-2 text-right">
                                   <Input
                                     type="number"
                                     step="0.01"
                                     min="0"
-                                    value={item.price}
-                                    onChange={(e) => updateItem(item.id, { price: Number(e.target.value || 0) })}
-                                    className="h-10 border-slate-200 bg-white text-slate-900"
+                                    value={item.quantity > 0 ? item.quantity * item.price : item.price}
+                                    onChange={(e) => {
+                                      const lineTotal = Number(e.target.value || 0);
+                                      const qty = item.quantity || 0;
+                                      updateItem(item.id, { price: qty > 0 ? lineTotal / qty : lineTotal });
+                                    }}
+                                    className="h-10 w-28 border-slate-200 bg-white text-right text-slate-900"
                                   />
-                                </td>
-                                <td className="px-4 py-2.5 text-right font-medium text-slate-700">
-                                  {formatMoney(item.quantity * item.price, currency)}
                                 </td>
                                 <td className="px-2 py-2">
                                   <button
